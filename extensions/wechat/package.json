@@ -1,0 +1,12 @@
+{
+  "name": "@clawdbot/wechat",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Clawdbot WeChat Work (企业微信) channel plugin",
+  "clawdbot": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {}
+}
