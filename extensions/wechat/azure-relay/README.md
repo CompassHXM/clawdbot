@@ -1,109 +1,111 @@
-# WeChat Work Azure Relay
+# WeChat Work Azure Function Relay
 
-Azure Function 用于接收企业微信的回调消息，解密后转发到 Clawdbot。
+接收企业微信回调消息，解密后转发到 Clawdbot；并提供应用主页 (快捷指令)。
 
-## 为什么需要这个？
+## 功能
 
-企业微信的回调消息使用 AES-256-CBC 加密，需要特定的解密流程。这个 Azure Function 作为中间层：
+| 端点 | 说明 |
+|------|------|
+| `GET/POST /api/wechat` | 企业微信消息回调 |
+| `GET /api/jssdk-config` | JS-SDK 签名配置 |
+| `GET /api/home` | 应用主页 (快捷指令按钮) |
 
-1. 接收企业微信的加密消息
-2. 验证签名并解密
-3. 转发明文 JSON 消息到 Clawdbot 的 webhook
-
-## 快速部署
-
-### 1. 安装依赖
-
-```bash
-cd azure-relay
-npm install
-```
-
-### 2. 配置本地环境（可选，用于本地测试）
-
-```bash
-cp local.settings.json.example local.settings.json
-# 编辑 local.settings.json 填入实际值
-```
-
-### 3. 部署到 Azure
-
-```bash
-# 确保已登录 Azure CLI
-az login
-
-# 部署（使用 --no-zip 参数很重要！）
-npm run deploy
-# 或
-func azure functionapp publish YOUR_FUNCTION_APP_NAME --javascript --no-zip
-```
-
-### 4. 配置 Azure Function 环境变量
-
-在 Azure Portal 中配置 Application Settings：
+## 环境变量
 
 | 变量 | 必需 | 说明 |
 |------|------|------|
 | `WECHAT_TOKEN` | ✅ | 企业微信后台配置的 Token |
-| `WECHAT_ENCODING_AES_KEY` | ✅ | 企业微信后台配置的 EncodingAESKey (43位) |
-| `WECHAT_CORP_ID` | ✅ | 企业ID (corpid) |
-| `CLAWDBOT_WEBHOOK_URL` | ✅ | Clawdbot 的 webhook 地址，如 `http://your-ip:3000/wechat-webhook` |
-| `CLAWDBOT_WEBHOOK_SECRET` | ❌ | 可选的 webhook 密钥 |
+| `WECHAT_ENCODING_AES_KEY` | ✅ | 43位 EncodingAESKey |
+| `WECHAT_CORP_ID` | ✅ | 企业ID |
+| `WECHAT_SECRET` | ✅ | 应用 Secret (用于获取 access_token) |
+| `WECHAT_AGENT_ID` | ✅ | 应用 AgentId |
+| `CLAWDBOT_WEBHOOK_URL` | ✅ | Clawdbot webhook 地址 |
+| `CLAWDBOT_WEBHOOK_SECRET` | | Webhook 密钥 (可选) |
 
-### 5. 配置企业微信
-
-1. 登录企业微信管理后台 https://work.weixin.qq.com
-2. 进入「应用管理」→ 选择你的应用
-3. 在「接收消息」设置中配置：
-   - **URL**: `https://YOUR_FUNCTION_APP.azurewebsites.net/api/wechat`
-   - **Token**: 与 `WECHAT_TOKEN` 相同
-   - **EncodingAESKey**: 与 `WECHAT_ENCODING_AES_KEY` 相同（可点击随机生成）
-4. 点击保存，企业微信会发送验证请求
-
-## 本地测试
+## 本地开发
 
 ```bash
-# 启动本地函数
-npm start
+# 1. 复制配置文件
+cp local.settings.json.example local.settings.json
 
-# 测试 URL 验证
-curl "http://localhost:7071/api/wechat?echostr=test"
+# 2. 编辑 local.settings.json，填入真实值
+
+# 3. 安装依赖
+npm install
+
+# 4. 启动
+func start
 ```
 
-## 转发的消息格式
+## 部署到 Azure
 
-转发到 Clawdbot 的 JSON 消息格式：
+```bash
+# 1. 登录 Azure
+az login
 
-```json
-{
-  "type": "wechat-work-message",
-  "fromUser": "UserID",
-  "toUser": "CorpID",
-  "msgType": "text",
-  "content": "消息内容",
-  "msgId": "消息ID",
-  "agentId": "应用AgentID",
-  "createTime": "1234567890",
-  "timestamp": 1234567890000
-}
+# 2. 部署 (使用 --no-zip 避免打包问题)
+func azure functionapp publish <function-app-name> --javascript --no-zip
+
+# 3. 配置环境变量 (Azure Portal → Function App → Configuration)
 ```
 
-## 故障排查
+## 企业微信后台配置
 
-### 验证失败 (403)
-- 检查 Token 是否与企业微信后台配置一致
-- 检查 EncodingAESKey 是否正确（43位）
-- 检查 CorpID 是否正确
+### 1. 消息回调配置
 
-### 解密失败 (400)
-- 检查 EncodingAESKey 是否完整（43位）
-- 确认收到的是有效的加密消息
+**应用管理 → 自建应用 → 接收消息 → 设置 API 接收**
 
-### 转发失败
-- 检查 CLAWDBOT_WEBHOOK_URL 是否可访问
-- 检查 Clawdbot Gateway 是否运行
-- 查看 Azure Function 日志
+- URL: `https://<your-function>.azurewebsites.net/api/wechat`
+- Token: 与环境变量 `WECHAT_TOKEN` 一致
+- EncodingAESKey: 与环境变量 `WECHAT_ENCODING_AES_KEY` 一致
 
-## 架构图
+### 2. 应用主页配置
 
-详见 [ARCHITECTURE.md](../docs/ARCHITECTURE.md)
+**应用管理 → 自建应用 → 应用主页**
+
+- 主页 URL: `https://<your-function>.azurewebsites.net/api/home`
+
+### 3. 可信域名配置 (用于 JS-SDK)
+
+**应用管理 → 自建应用 → 开发者接口 → 网页授权及JS-SDK**
+
+- 可信域名: `<your-function>.azurewebsites.net`
+
+## 应用主页功能
+
+主页提供以下快捷指令按钮：
+
+- 🌤️ 查天气
+- 📅 今日日程
+- 📧 查邮件
+- 📝 快速记事
+- ✅ 待办清单
+- 自定义消息输入框
+
+点击按钮后，消息通过 JS-SDK 直接发送到应用会话，由现有的消息流程处理。
+
+## 架构
+
+```
+用户点击主页按钮
+    ↓
+/api/home (返回 H5 页面)
+    ↓
+页面加载 → /api/jssdk-config (获取签名)
+    ↓
+wx.config() 初始化
+    ↓
+用户点击 → wx.invoke('sendChatMessage')
+    ↓
+企业微信服务器 → /api/wechat (消息回调)
+    ↓
+解密 → 转发到 Clawdbot webhook
+    ↓
+Nova 处理并回复
+```
+
+## 注意事项
+
+1. **单文件结构**: 所有代码在 `index.js` 中，避免 Azure 多文件加载问题
+2. **缓存**: `access_token` 和 `jsapi_ticket` 自动缓存，减少 API 调用
+3. **部署**: 必须使用 `--no-zip` 参数
