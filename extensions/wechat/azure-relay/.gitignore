@@ -1,0 +1,10 @@
+# Local settings (contains secrets)
+local.settings.json
+
+# Node modules
+node_modules/
+
+# Azure Functions
+bin/
+obj/
+.vs/
