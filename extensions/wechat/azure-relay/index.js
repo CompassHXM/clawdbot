@@ -1,18 +1,39 @@
 /**
  * WeChat Work Relay - Azure Function
  * 
- * 接收企业微信的回调消息，解密后转发到 Clawdbot webhook
+ * 功能:
+ * 1. /api/wechat - 接收企业微信的回调消息，解密后转发到 Clawdbot webhook
+ * 2. /api/jssdk-config - 提供 JS-SDK 签名配置
+ * 3. /api/home - 应用主页（快捷指令）
  * 
  * 环境变量:
  * - WECHAT_TOKEN: 企业微信后台配置的 Token
  * - WECHAT_ENCODING_AES_KEY: 企业微信后台配置的 EncodingAESKey (43位)
  * - WECHAT_CORP_ID: 企业ID (corpid)
+ * - WECHAT_SECRET: 应用的 Secret (用于获取 access_token)
+ * - WECHAT_AGENT_ID: 应用的 AgentId
  * - CLAWDBOT_WEBHOOK_URL: Clawdbot webhook 地址
  * - CLAWDBOT_WEBHOOK_SECRET: (可选) Webhook 密钥
  */
 
 const { app } = require("@azure/functions");
 const crypto = require("crypto");
+
+// ============================================================================
+// 缓存
+// ============================================================================
+
+// access_token 缓存 (有效期 7200 秒)
+let accessTokenCache = {
+  token: null,
+  expiresAt: 0,
+};
+
+// jsapi_ticket 缓存 (有效期 7200 秒)
+let jsapiTicketCache = {
+  ticket: null,
+  expiresAt: 0,
+};
 
 // ============================================================================
 // WeChat Crypto 实现
@@ -29,11 +50,6 @@ class WxBizMsgCrypt {
 
   /**
    * 验证签名
-   * @param {string} signature - 签名
-   * @param {string} timestamp - 时间戳
-   * @param {string} nonce - 随机数
-   * @param {string} echostr - 加密字符串
-   * @returns {boolean}
    */
   verifySignature(signature, timestamp, nonce, echostr) {
     const arr = [this.token, timestamp, nonce, echostr].sort();
@@ -43,12 +59,7 @@ class WxBizMsgCrypt {
   }
 
   /**
-   * 验证 URL 回调（首次配置时的验证请求）
-   * @param {string} msgSignature - 消息签名
-   * @param {string} timestamp - 时间戳
-   * @param {string} nonce - 随机数
-   * @param {string} echostr - 加密的 echostr
-   * @returns {string|null} 解密后的 echostr，验证失败返回 null
+   * 验证 URL 回调
    */
   verifyUrl(msgSignature, timestamp, nonce, echostr) {
     if (!this.verifySignature(msgSignature, timestamp, nonce, echostr)) {
@@ -59,8 +70,6 @@ class WxBizMsgCrypt {
 
   /**
    * 解密消息
-   * @param {string} encrypted - Base64 编码的加密消息
-   * @returns {string|null} 解密后的明文，失败返回 null
    */
   decrypt(encrypted) {
     try {
@@ -77,13 +86,11 @@ class WxBizMsgCrypt {
       const pad = decrypted[decrypted.length - 1];
       decrypted = decrypted.subarray(0, decrypted.length - pad);
 
-      // 解析结构：前 16 字节是随机字符串，接下来 4 字节是消息长度（网络字节序），
-      // 然后是消息内容，最后是 corpId
+      // 解析结构
       const msgLen = decrypted.readUInt32BE(16);
       const msg = decrypted.subarray(20, 20 + msgLen).toString("utf8");
       const receivedCorpId = decrypted.subarray(20 + msgLen).toString("utf8");
 
-      // 验证 corpId
       if (receivedCorpId !== this.corpId) {
         console.error("CorpId mismatch: expected " + this.corpId + ", got " + receivedCorpId);
         return null;
@@ -101,11 +108,6 @@ class WxBizMsgCrypt {
 // XML 解析
 // ============================================================================
 
-/**
- * 解析企业微信消息 XML
- * @param {string} xml - XML 字符串
- * @returns {Object} 解析后的消息对象
- */
 function parseXml(xml) {
   const extract = (tag) => {
     const match = new RegExp("<" + tag + "><!\\[CDATA\\[([\\s\\S]*?)\\]\\]></" + tag + ">").exec(xml);
@@ -135,39 +137,106 @@ function parseXml(xml) {
 // 配置管理
 // ============================================================================
 
-/**
- * 从环境变量获取配置
- * @returns {Object} 配置对象
- * @throws {Error} 配置缺失时抛出错误
- */
 function getConfig() {
   const token = process.env.WECHAT_TOKEN;
   const encodingAESKey = process.env.WECHAT_ENCODING_AES_KEY;
   const corpId = process.env.WECHAT_CORP_ID;
+  const secret = process.env.WECHAT_SECRET;
+  const agentId = process.env.WECHAT_AGENT_ID;
   const webhookUrl = process.env.CLAWDBOT_WEBHOOK_URL;
   const webhookSecret = process.env.CLAWDBOT_WEBHOOK_SECRET;
 
-  if (!token || !encodingAESKey || !corpId) {
-    throw new Error("Missing WeChat config: WECHAT_TOKEN, WECHAT_ENCODING_AES_KEY, WECHAT_CORP_ID");
-  }
-  if (!webhookUrl) {
-    throw new Error("Missing CLAWDBOT_WEBHOOK_URL");
+  return { token, encodingAESKey, corpId, secret, agentId, webhookUrl, webhookSecret };
+}
+
+// ============================================================================
+// 企业微信 API
+// ============================================================================
+
+const WECHAT_API = "https://qyapi.weixin.qq.com/cgi-bin";
+
+/**
+ * 获取 access_token (带缓存)
+ */
+async function getAccessToken(corpId, secret, context) {
+  const now = Date.now();
+  
+  // 检查缓存 (提前 5 分钟过期)
+  if (accessTokenCache.token && accessTokenCache.expiresAt > now + 300000) {
+    context.log("Using cached access_token");
+    return accessTokenCache.token;
   }
 
-  return { token, encodingAESKey, corpId, webhookUrl, webhookSecret };
+  context.log("Fetching new access_token");
+  const url = `${WECHAT_API}/gettoken?corpid=${corpId}&corpsecret=${secret}`;
+  const response = await fetch(url);
+  const data = await response.json();
+
+  if (data.errcode && data.errcode !== 0) {
+    throw new Error(`gettoken failed: ${data.errmsg} (${data.errcode})`);
+  }
+
+  accessTokenCache = {
+    token: data.access_token,
+    expiresAt: now + data.expires_in * 1000,
+  };
+
+  return data.access_token;
+}
+
+/**
+ * 获取 jsapi_ticket (带缓存)
+ */
+async function getJsapiTicket(accessToken, context) {
+  const now = Date.now();
+  
+  // 检查缓存 (提前 5 分钟过期)
+  if (jsapiTicketCache.ticket && jsapiTicketCache.expiresAt > now + 300000) {
+    context.log("Using cached jsapi_ticket");
+    return jsapiTicketCache.ticket;
+  }
+
+  context.log("Fetching new jsapi_ticket");
+  const url = `${WECHAT_API}/get_jsapi_ticket?access_token=${accessToken}`;
+  const response = await fetch(url);
+  const data = await response.json();
+
+  if (data.errcode && data.errcode !== 0) {
+    throw new Error(`get_jsapi_ticket failed: ${data.errmsg} (${data.errcode})`);
+  }
+
+  jsapiTicketCache = {
+    ticket: data.ticket,
+    expiresAt: now + data.expires_in * 1000,
+  };
+
+  return data.ticket;
+}
+
+/**
+ * 生成 JS-SDK 签名
+ */
+function generateJssdkSignature(ticket, nonceStr, timestamp, url) {
+  const rawString = `jsapi_ticket=${ticket}&noncestr=${nonceStr}&timestamp=${timestamp}&url=${url}`;
+  return crypto.createHash("sha1").update(rawString).digest("hex");
+}
+
+/**
+ * 生成随机字符串
+ */
+function generateNonceStr(length = 16) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
 }
 
 // ============================================================================
 // Clawdbot 转发
 // ============================================================================
 
-/**
- * 转发消息到 Clawdbot webhook
- * @param {Object} message - 解析后的消息对象
- * @param {Object} config - 配置对象
- * @param {Object} context - Azure Function 上下文
- * @returns {Promise<boolean>} 是否成功
- */
 async function forwardToClawdbot(message, config, context) {
   const payload = {
     type: "wechat-work-message",
@@ -179,10 +248,8 @@ async function forwardToClawdbot(message, config, context) {
     agentId: message.AgentID,
     createTime: message.CreateTime,
     timestamp: Date.now(),
-    // 事件类型消息的额外字段
     event: message.Event,
     eventKey: message.EventKey,
-    // 图片消息的额外字段
     picUrl: message.PicUrl,
     mediaId: message.MediaId,
   };
@@ -214,41 +281,348 @@ async function forwardToClawdbot(message, config, context) {
 }
 
 // ============================================================================
-// 主处理函数
+// 应用主页 HTML
+// ============================================================================
+
+function getHomeHtml(config) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Nova 快捷指令</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 400px;
+      margin: 0 auto;
+    }
+    .header {
+      text-align: center;
+      color: white;
+      margin-bottom: 24px;
+    }
+    .header h1 {
+      font-size: 28px;
+      margin-bottom: 8px;
+    }
+    .header p {
+      font-size: 14px;
+      opacity: 0.9;
+    }
+    .card {
+      background: white;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+    }
+    .section-title {
+      font-size: 12px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 16px 0 12px 0;
+    }
+    .section-title:first-child {
+      margin-top: 0;
+    }
+    .btn {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      padding: 14px 16px;
+      margin: 8px 0;
+      font-size: 16px;
+      border: none;
+      border-radius: 12px;
+      background: #f5f5f7;
+      color: #333;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-align: left;
+    }
+    .btn:active {
+      transform: scale(0.98);
+      background: #e8e8ed;
+    }
+    .btn .icon {
+      font-size: 24px;
+      margin-right: 12px;
+      width: 32px;
+      text-align: center;
+    }
+    .btn .text {
+      flex: 1;
+    }
+    .btn .text .title {
+      font-weight: 500;
+    }
+    .btn .text .desc {
+      font-size: 12px;
+      color: #888;
+      margin-top: 2px;
+    }
+    .status {
+      text-align: center;
+      padding: 12px;
+      margin-top: 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      display: none;
+    }
+    .status.success {
+      display: block;
+      background: #d4edda;
+      color: #155724;
+    }
+    .status.error {
+      display: block;
+      background: #f8d7da;
+      color: #721c24;
+    }
+    .status.loading {
+      display: block;
+      background: #e2e3e5;
+      color: #383d41;
+    }
+    .custom-input {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .custom-input input {
+      flex: 1;
+      padding: 12px;
+      border: 2px solid #e8e8ed;
+      border-radius: 10px;
+      font-size: 16px;
+      outline: none;
+    }
+    .custom-input input:focus {
+      border-color: #667eea;
+    }
+    .custom-input button {
+      padding: 12px 20px;
+      background: #667eea;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .custom-input button:active {
+      opacity: 0.8;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🌟 Nova</h1>
+      <p>点击按钮发送快捷指令</p>
+    </div>
+    
+    <div class="card">
+      <div class="section-title">常用</div>
+      
+      <button class="btn" onclick="send('今天天气怎么样？')">
+        <span class="icon">🌤️</span>
+        <span class="text">
+          <div class="title">查天气</div>
+          <div class="desc">获取今日天气预报</div>
+        </span>
+      </button>
+      
+      <button class="btn" onclick="send('帮我看看日历，今天有什么安排？')">
+        <span class="icon">📅</span>
+        <span class="text">
+          <div class="title">今日日程</div>
+          <div class="desc">查看今天的日程安排</div>
+        </span>
+      </button>
+      
+      <button class="btn" onclick="send('查一下最近有没有重要邮件')">
+        <span class="icon">📧</span>
+        <span class="text">
+          <div class="title">查邮件</div>
+          <div class="desc">检查最近的重要邮件</div>
+        </span>
+      </button>
+
+      <div class="section-title">效率</div>
+      
+      <button class="btn" onclick="send('帮我记一下：')">
+        <span class="icon">📝</span>
+        <span class="text">
+          <div class="title">快速记事</div>
+          <div class="desc">记录一条备忘</div>
+        </span>
+      </button>
+      
+      <button class="btn" onclick="send('我的待办事项有哪些？')">
+        <span class="icon">✅</span>
+        <span class="text">
+          <div class="title">待办清单</div>
+          <div class="desc">查看待办事项</div>
+        </span>
+      </button>
+
+      <div class="section-title">自定义</div>
+      
+      <div class="custom-input">
+        <input type="text" id="customMsg" placeholder="输入消息..." />
+        <button onclick="sendCustom()">发送</button>
+      </div>
+
+      <div id="status" class="status"></div>
+    </div>
+  </div>
+
+  <script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"></script>
+  <script>
+    const corpId = "${config.corpId}";
+    const agentId = "${config.agentId}";
+    let sdkReady = false;
+
+    // 页面加载时初始化 JS-SDK
+    async function initJsSdk() {
+      showStatus('正在初始化...', 'loading');
+      
+      try {
+        // 获取签名配置
+        const url = encodeURIComponent(location.href.split('#')[0]);
+        const response = await fetch('/api/jssdk-config?url=' + url);
+        const config = await response.json();
+        
+        if (config.error) {
+          throw new Error(config.error);
+        }
+
+        // 初始化 JS-SDK
+        wx.config({
+          beta: true,
+          debug: false,
+          appId: config.corpId,
+          timestamp: config.timestamp,
+          nonceStr: config.nonceStr,
+          signature: config.signature,
+          jsApiList: ['sendChatMessage']
+        });
+
+        wx.ready(function() {
+          sdkReady = true;
+          hideStatus();
+          console.log('JS-SDK ready');
+        });
+
+        wx.error(function(res) {
+          console.error('JS-SDK error:', res);
+          showStatus('SDK 初始化失败: ' + res.errMsg, 'error');
+        });
+
+      } catch (err) {
+        console.error('Init error:', err);
+        showStatus('初始化失败: ' + err.message, 'error');
+      }
+    }
+
+    // 发送消息
+    function send(text) {
+      if (!sdkReady) {
+        showStatus('SDK 未就绪，请稍候...', 'loading');
+        return;
+      }
+
+      wx.invoke('sendChatMessage', {
+        msgtype: 'text',
+        text: {
+          content: text
+        }
+      }, function(res) {
+        if (res.err_msg === 'sendChatMessage:ok') {
+          showStatus('✓ 已发送', 'success');
+          setTimeout(hideStatus, 2000);
+        } else {
+          console.error('Send failed:', res);
+          showStatus('发送失败: ' + res.err_msg, 'error');
+        }
+      });
+    }
+
+    // 发送自定义消息
+    function sendCustom() {
+      const input = document.getElementById('customMsg');
+      const text = input.value.trim();
+      if (text) {
+        send(text);
+        input.value = '';
+      }
+    }
+
+    // 状态显示
+    function showStatus(msg, type) {
+      const el = document.getElementById('status');
+      el.textContent = msg;
+      el.className = 'status ' + type;
+    }
+
+    function hideStatus() {
+      document.getElementById('status').className = 'status';
+    }
+
+    // Enter 键发送
+    document.getElementById('customMsg').addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        sendCustom();
+      }
+    });
+
+    // 初始化
+    initJsSdk();
+  </script>
+</body>
+</html>`;
+}
+
+// ============================================================================
+// HTTP Handlers
 // ============================================================================
 
 /**
- * Azure Function 处理函数
- * @param {Object} request - HTTP 请求
- * @param {Object} context - 函数上下文
- * @returns {Promise<Object>} HTTP 响应
+ * /api/wechat - 消息回调处理
  */
 async function wechatCallback(request, context) {
   context.log("WeChat callback: " + request.method + " " + request.url);
 
-  // 获取配置
-  let config;
-  try {
-    config = getConfig();
-  } catch (err) {
-    context.error("Config error: " + err);
+  const config = getConfig();
+  
+  if (!config.token || !config.encodingAESKey || !config.corpId) {
+    context.error("Missing WeChat config");
     return { status: 500, body: "Configuration error" };
   }
 
-  // 初始化加密工具
   const crypt = new WxBizMsgCrypt({
     token: config.token,
     encodingAESKey: config.encodingAESKey,
     corpId: config.corpId,
   });
 
-  // 获取 URL 参数
   const msgSignature = request.query.get("msg_signature") || "";
   const timestamp = request.query.get("timestamp") || "";
   const nonce = request.query.get("nonce") || "";
   const echostr = request.query.get("echostr") || "";
 
-  // GET 请求: URL 验证（企业微信首次配置回调时的验证）
+  // GET: URL 验证
   if (request.method === "GET") {
     context.log("URL verification request");
     
@@ -262,64 +636,143 @@ async function wechatCallback(request, context) {
       return { status: 403, body: "Verification failed" };
     }
 
-    context.log("URL verification success: " + decrypted);
+    context.log("URL verification success");
     return { status: 200, body: decrypted };
   }
 
-  // POST 请求: 消息回调
+  // POST: 消息回调
   if (request.method === "POST") {
     const body = await request.text();
     context.log("Received message body length: " + body.length);
 
-    // 从 XML 中提取加密消息
     const encryptMatch = /<Encrypt><!\[CDATA\[([\s\S]*?)\]\]><\/Encrypt>/.exec(body);
     if (!encryptMatch) {
-      context.error("No encrypted content found in body");
-      return { status: 400, body: "Invalid request: no encrypted content" };
+      context.error("No encrypted content found");
+      return { status: 400, body: "Invalid request" };
     }
 
     const encrypted = encryptMatch[1];
 
-    // 验证签名
     if (!crypt.verifySignature(msgSignature, timestamp, nonce, encrypted)) {
-      context.error("Message signature verification failed");
+      context.error("Signature verification failed");
       return { status: 403, body: "Signature verification failed" };
     }
 
-    // 解密消息
     const decrypted = crypt.decrypt(encrypted);
     if (!decrypted) {
-      context.error("Message decryption failed");
+      context.error("Decryption failed");
       return { status: 400, body: "Decryption failed" };
     }
 
-    context.log("Decrypted message: " + decrypted.substring(0, 200) + "...");
-
-    // 解析 XML
     const message = parseXml(decrypted);
     if (!message || !message.FromUserName) {
-      context.error("XML parse failed or missing FromUserName");
+      context.error("Invalid message format");
       return { status: 400, body: "Invalid message format" };
     }
 
-    context.log("Parsed message: type=" + message.MsgType + ", from=" + message.FromUserName);
+    context.log("Message from " + message.FromUserName + ": " + message.MsgType);
 
-    // 转发到 Clawdbot
     await forwardToClawdbot(message, config, context);
 
-    // 企业微信要求返回 "success" 或空字符串表示成功
     return { status: 200, body: "success" };
   }
 
   return { status: 405, body: "Method not allowed" };
 }
 
+/**
+ * /api/jssdk-config - JS-SDK 签名配置
+ */
+async function jssdkConfig(request, context) {
+  context.log("JSSDK config request");
+
+  const config = getConfig();
+  
+  if (!config.corpId || !config.secret) {
+    return {
+      status: 500,
+      jsonBody: { error: "Missing WECHAT_CORP_ID or WECHAT_SECRET" }
+    };
+  }
+
+  const url = request.query.get("url");
+  if (!url) {
+    return {
+      status: 400,
+      jsonBody: { error: "Missing url parameter" }
+    };
+  }
+
+  try {
+    // 获取 access_token
+    const accessToken = await getAccessToken(config.corpId, config.secret, context);
+    
+    // 获取 jsapi_ticket
+    const ticket = await getJsapiTicket(accessToken, context);
+    
+    // 生成签名
+    const timestamp = Math.floor(Date.now() / 1000);
+    const nonceStr = generateNonceStr();
+    const signature = generateJssdkSignature(ticket, nonceStr, timestamp, decodeURIComponent(url));
+
+    context.log("JSSDK config generated for: " + url);
+
+    return {
+      status: 200,
+      jsonBody: {
+        corpId: config.corpId,
+        agentId: config.agentId,
+        timestamp,
+        nonceStr,
+        signature,
+      }
+    };
+  } catch (err) {
+    context.error("JSSDK config error: " + err);
+    return {
+      status: 500,
+      jsonBody: { error: err.message }
+    };
+  }
+}
+
+/**
+ * /api/home - 应用主页
+ */
+async function homePage(request, context) {
+  context.log("Home page request");
+
+  const config = getConfig();
+
+  return {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8"
+    },
+    body: getHomeHtml(config)
+  };
+}
+
 // ============================================================================
-// 注册 Azure Function
+// 注册 Azure Functions
 // ============================================================================
 
 app.http("wechat", {
   methods: ["GET", "POST"],
   authLevel: "anonymous",
   handler: wechatCallback,
+});
+
+app.http("jssdk-config", {
+  route: "jssdk-config",
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: jssdkConfig,
+});
+
+app.http("home", {
+  route: "home",
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: homePage,
 });
