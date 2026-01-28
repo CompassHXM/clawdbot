@@ -298,22 +298,87 @@ async function processMessage(
     },
   });
 
-  // Inject message into session
-  const sessionKey = `wechat:${account.accountId}:${message.fromUser}`;
-  await core.channel.reply.replyPipeline({
-    cfg: config,
+  // Build envelope for agent
+  const storePath = core.channel.session.resolveStorePath(config.session?.store, {
     agentId: route.agentId,
-    channel: "wechat",
-    accountId: account.accountId,
-    sessionKey,
-    chatType: "direct",
-    senderId: message.fromUser,
-    text,
-    messageId: message.msgId,
-    replyTarget: message.fromUser,
+  });
+  const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(config);
+  const previousTimestamp = core.channel.session.readSessionUpdatedAt({
+    storePath,
+    sessionKey: route.sessionKey,
+  });
+  const body = core.channel.reply.formatAgentEnvelope({
+    channel: "WeChat",
+    from: message.fromUser,
+    timestamp: message.timestamp ?? Date.now(),
+    previousTimestamp,
+    envelope: envelopeOptions,
+    body: text,
   });
 
-  runtime.log?.(`[wechat] message routed to session ${sessionKey}`);
+  const ctxPayload = {
+    Body: body,
+    BodyForAgent: body,
+    RawBody: text,
+    CommandBody: text,
+    BodyForCommands: text,
+    From: `wechat:${message.fromUser}`,
+    To: `wechat:${message.fromUser}`,
+    SessionKey: route.sessionKey,
+    AccountId: route.accountId,
+    ChatType: "direct" as const,
+    ConversationLabel: message.fromUser,
+    SenderId: message.fromUser,
+    Provider: "wechat",
+    Surface: "wechat",
+    MessageSid: message.msgId,
+    Timestamp: message.timestamp ?? Date.now(),
+    OriginatingChannel: "wechat",
+    OriginatingTo: `wechat:${message.fromUser}`,
+    WasMentioned: true,
+    CommandAuthorized: true,
+  };
+
+  // Dispatch reply using the standard pipeline
+  const section = config?.channels?.wechat as WechatWorkConfig | undefined;
+  await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+    ctx: ctxPayload,
+    cfg: config,
+    dispatcherOptions: {
+      deliver: async (payload) => {
+        if (!section?.corpId || !section?.agentId || !section?.secret) {
+          runtime.error?.("[wechat] cannot send reply: missing corpId/agentId/secret");
+          return;
+        }
+        const textLimit = 2048;
+        const chunks = core.channel.text.chunkMarkdownText(payload.text ?? "", textLimit);
+        if (!chunks.length && payload.text) chunks.push(payload.text);
+        
+        for (const chunk of chunks) {
+          const { sendWorkWechatMessage } = await import("./channel.js");
+          await sendWorkWechatMessage({
+            corpId: section.corpId,
+            secret: section.secret,
+            agentId: section.agentId,
+            toUser: message.fromUser,
+            content: chunk,
+          });
+          statusSink?.({ lastOutboundAt: Date.now() });
+        }
+      },
+      onReplyStart: async () => {
+        // WeChat doesn't support typing indicators
+      },
+      onIdle: async () => {
+        // WeChat doesn't support typing indicators
+      },
+      onError: (err, info) => {
+        runtime.error?.(`[wechat] ${info.kind} reply failed: ${String(err)}`);
+      },
+    },
+  });
+
+  runtime.log?.(`[wechat] message dispatched to session ${route.sessionKey}`);
 }
 
 export function startWechatMonitor(options: WechatMonitorOptions): () => void {
