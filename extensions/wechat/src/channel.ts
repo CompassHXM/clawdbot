@@ -175,7 +175,8 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
     listAccountIds: (cfg) => listWechatWorkAccountIds(cfg),
     resolveAccount: (cfg, accountId) => resolveWechatWorkAccount({ cfg, accountId }),
     defaultAccountId: () => DEFAULT_ACCOUNT_ID,
-    isConfigured: (account) => Boolean(account.corpId && account.agentId && account.secret),
+    // Webhook 接收模式不需要完整配置也能工作
+    isConfigured: (account) => account.enabled ?? true,
     describeAccount: (account) => ({
       accountId: account.accountId,
       name: account.name,

@@ -1,0 +1,16 @@
+{
+  "name": "wechat-work-relay",
+  "version": "1.0.0",
+  "description": "Azure Function to relay WeChat Work messages to Clawdbot",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "func start",
+    "deploy": "func azure functionapp publish func-clawdbot-wechat --javascript --no-zip"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.0.0"
+  }
+}

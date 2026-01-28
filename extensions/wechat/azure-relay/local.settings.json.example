@@ -1,0 +1,11 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "AzureWebJobsStorage": "",
+    "WECHAT_TOKEN": "your-token",
+    "WECHAT_ENCODING_AES_KEY": "your-43-char-encoding-aes-key",
+    "WECHAT_CORP_ID": "your-corp-id",
+    "CLAWDBOT_WEBHOOK_URL": "http://your-clawdbot-ip:3000/wechat-webhook"
+  }
+}

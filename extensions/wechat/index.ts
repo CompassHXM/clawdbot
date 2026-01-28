@@ -1,3 +1,5 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+
 import type { ClawdbotPluginApi } from "clawdbot/plugin-sdk";
 import { emptyPluginConfigSchema } from "clawdbot/plugin-sdk";
 
@@ -14,10 +16,13 @@ const plugin = {
     setWechatRuntime(api.runtime);
     api.registerChannel({ plugin: wechatPlugin });
     
-    // Register HTTP handler for incoming webhooks
-    api.registerHttpHandler({
+    // Register HTTP route for incoming webhooks
+    // Adapter: handleWechatWebhookRequest returns boolean, but registerHttpRoute expects void
+    api.registerHttpRoute({
       path: "/wechat-webhook",
-      handler: handleWechatWebhookRequest,
+      handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+        await handleWechatWebhookRequest(req, res);
+      },
     });
   },
 };
