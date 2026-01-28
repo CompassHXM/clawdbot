@@ -372,28 +372,9 @@ function getHomeHtml(config) {
       color: #888;
       margin-top: 2px;
     }
-    .status {
-      text-align: center;
-      padding: 12px;
-      margin-top: 16px;
-      border-radius: 8px;
-      font-size: 14px;
-      display: none;
-    }
-    .status.success {
-      display: block;
-      background: #d4edda;
-      color: #155724;
-    }
-    .status.error {
-      display: block;
-      background: #f8d7da;
-      color: #721c24;
-    }
-    .status.loading {
-      display: block;
-      background: #e2e3e5;
-      color: #383d41;
+    .btn .arrow {
+      color: #ccc;
+      font-size: 18px;
     }
     .custom-input {
       display: flex;
@@ -423,13 +404,20 @@ function getHomeHtml(config) {
     .custom-input button:active {
       opacity: 0.8;
     }
+    .hint {
+      text-align: center;
+      color: #888;
+      font-size: 12px;
+      margin-top: 16px;
+      padding: 0 10px;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
       <h1>🌟 Nova</h1>
-      <p>点击按钮发送快捷指令</p>
+      <p>点击按钮，跳转聊天并发送</p>
     </div>
     
     <div class="card">
@@ -441,6 +429,7 @@ function getHomeHtml(config) {
           <div class="title">查天气</div>
           <div class="desc">获取今日天气预报</div>
         </span>
+        <span class="arrow">›</span>
       </button>
       
       <button class="btn" onclick="send('帮我看看日历，今天有什么安排？')">
@@ -449,6 +438,7 @@ function getHomeHtml(config) {
           <div class="title">今日日程</div>
           <div class="desc">查看今天的日程安排</div>
         </span>
+        <span class="arrow">›</span>
       </button>
       
       <button class="btn" onclick="send('查一下最近有没有重要邮件')">
@@ -457,6 +447,7 @@ function getHomeHtml(config) {
           <div class="title">查邮件</div>
           <div class="desc">检查最近的重要邮件</div>
         </span>
+        <span class="arrow">›</span>
       </button>
 
       <div class="section-title">效率</div>
@@ -467,6 +458,7 @@ function getHomeHtml(config) {
           <div class="title">快速记事</div>
           <div class="desc">记录一条备忘</div>
         </span>
+        <span class="arrow">›</span>
       </button>
       
       <button class="btn" onclick="send('我的待办事项有哪些？')">
@@ -475,6 +467,7 @@ function getHomeHtml(config) {
           <div class="title">待办清单</div>
           <div class="desc">查看待办事项</div>
         </span>
+        <span class="arrow">›</span>
       </button>
 
       <div class="section-title">自定义</div>
@@ -484,79 +477,15 @@ function getHomeHtml(config) {
         <button onclick="sendCustom()">发送</button>
       </div>
 
-      <div id="status" class="status"></div>
+      <p class="hint">点击后跳转到聊天窗口，消息已预填，再点发送即可</p>
     </div>
   </div>
 
-  <script src="https://res.wx.qq.com/open/js/jweixin-1.2.0.js"></script>
   <script>
-    const corpId = "${config.corpId}";
-    const agentId = "${config.agentId}";
-    let sdkReady = false;
-
-    // 页面加载时初始化 JS-SDK
-    async function initJsSdk() {
-      showStatus('正在初始化...', 'loading');
-      
-      try {
-        // 获取签名配置
-        const url = encodeURIComponent(location.href.split('#')[0]);
-        const response = await fetch('/api/jssdk-config?url=' + url);
-        const config = await response.json();
-        
-        if (config.error) {
-          throw new Error(config.error);
-        }
-
-        // 初始化 JS-SDK
-        wx.config({
-          beta: true,
-          debug: false,
-          appId: config.corpId,
-          timestamp: config.timestamp,
-          nonceStr: config.nonceStr,
-          signature: config.signature,
-          jsApiList: ['sendChatMessage']
-        });
-
-        wx.ready(function() {
-          sdkReady = true;
-          hideStatus();
-          console.log('JS-SDK ready');
-        });
-
-        wx.error(function(res) {
-          console.error('JS-SDK error:', res);
-          showStatus('SDK 初始化失败: ' + res.errMsg, 'error');
-        });
-
-      } catch (err) {
-        console.error('Init error:', err);
-        showStatus('初始化失败: ' + err.message, 'error');
-      }
-    }
-
-    // 发送消息
+    // 方案 B: 使用 URL Scheme 跳转到聊天窗口
     function send(text) {
-      if (!sdkReady) {
-        showStatus('SDK 未就绪，请稍候...', 'loading');
-        return;
-      }
-
-      wx.invoke('sendChatMessage', {
-        msgtype: 'text',
-        text: {
-          content: text
-        }
-      }, function(res) {
-        if (res.err_msg === 'sendChatMessage:ok') {
-          showStatus('✓ 已发送', 'success');
-          setTimeout(hideStatus, 2000);
-        } else {
-          console.error('Send failed:', res);
-          showStatus('发送失败: ' + res.err_msg, 'error');
-        }
-      });
+      // wxwork://message 会打开应用聊天并预填消息
+      window.location.href = 'wxwork://message?content=' + encodeURIComponent(text);
     }
 
     // 发送自定义消息
@@ -569,26 +498,12 @@ function getHomeHtml(config) {
       }
     }
 
-    // 状态显示
-    function showStatus(msg, type) {
-      const el = document.getElementById('status');
-      el.textContent = msg;
-      el.className = 'status ' + type;
-    }
-
-    function hideStatus() {
-      document.getElementById('status').className = 'status';
-    }
-
     // Enter 键发送
     document.getElementById('customMsg').addEventListener('keypress', function(e) {
       if (e.key === 'Enter') {
         sendCustom();
       }
     });
-
-    // 初始化
-    initJsSdk();
   </script>
 </body>
 </html>`;
@@ -758,21 +673,32 @@ async function homePage(request, context) {
 // ============================================================================
 
 app.http("wechat", {
+  route: "api/wechat",
   methods: ["GET", "POST"],
   authLevel: "anonymous",
   handler: wechatCallback,
 });
 
 app.http("jssdk-config", {
-  route: "jssdk-config",
+  route: "api/jssdk-config",
   methods: ["GET"],
   authLevel: "anonymous",
   handler: jssdkConfig,
 });
 
 app.http("home", {
-  route: "home",
+  route: "api/home",
   methods: ["GET"],
   authLevel: "anonymous",
   handler: homePage,
+});
+
+// 企业微信域名验证文件 (根目录)
+app.http("wechat-verify", {
+  route: "WW_verify_RBDRoelCfCCaKXU1.txt",
+  methods: ["GET"],
+  authLevel: "anonymous",
+  handler: async (request, context) => {
+    return { status: 200, body: "RBDRoelCfCCaKXU1" };
+  },
 });
