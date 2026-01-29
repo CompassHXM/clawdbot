@@ -324,7 +324,24 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
         lastStartAt: Date.now(),
       });
 
-      return { cleanup: unregister };
+      // 返回一个 long-running Promise，和其他 channel 保持一致
+      // 只有在 abortSignal 触发时才 resolve，确保 cleanup 被正确调用
+      return new Promise<void>((resolve) => {
+        if (abortSignal.aborted) {
+          unregister();
+          resolve();
+          return;
+        }
+        abortSignal.addEventListener(
+          "abort",
+          () => {
+            log?.info(`[${account.accountId}] Stopping WeChat Work (abort signal)`);
+            unregister();
+            resolve();
+          },
+          { once: true },
+        );
+      });
     },
     stopAccount: async (ctx) => {
       const { account, log, setStatus, getStatus } = ctx;
