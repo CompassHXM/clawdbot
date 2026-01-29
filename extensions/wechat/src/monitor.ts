@@ -33,6 +33,33 @@ type WebhookTarget = {
 
 const webhookTargets = new Map<string, WebhookTarget[]>();
 
+// 消息去重缓存 (msgId -> timestamp)
+// 防止企业微信重试或多 target 导致的重复处理
+const DEDUPE_TTL_MS = 5 * 60 * 1000; // 5 分钟
+const DEDUPE_MAX_SIZE = 1000;
+const processedMessages = new Map<string, number>();
+
+function isMessageProcessed(msgId: string): boolean {
+  if (!msgId) return false;
+  const now = Date.now();
+
+  // 清理过期条目
+  if (processedMessages.size > DEDUPE_MAX_SIZE / 2) {
+    for (const [id, ts] of processedMessages) {
+      if (now - ts > DEDUPE_TTL_MS) {
+        processedMessages.delete(id);
+      }
+    }
+  }
+
+  if (processedMessages.has(msgId)) {
+    return true;
+  }
+
+  processedMessages.set(msgId, now);
+  return false;
+}
+
 function normalizeWebhookPath(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "/";
@@ -160,7 +187,6 @@ export async function handleWechatWebhookRequest(
   }
 
   const payload = asRecord(body.value) ?? {};
-  const firstTarget = targets[0];
 
   // Verify webhook secret if configured
   const matching = targets.filter((target) => {
@@ -186,22 +212,28 @@ export async function handleWechatWebhookRequest(
     return true;
   }
 
-  for (const target of matching) {
-    target.statusSink?.({ lastInboundAt: Date.now() });
-    processMessage(message, target).catch((err) => {
-      target.runtime.error?.(
-        `[${target.account.accountId}] WeChat webhook failed: ${String(err)}`,
-      );
-    });
+  // 消息去重：检查 msgId 是否已处理
+  if (isMessageProcessed(message.msgId)) {
+    res.statusCode = 200;
+    res.end("ok");
+    console.log(`[wechat] webhook skipped: duplicate msgId=${message.msgId}`);
+    return true;
   }
+
+  // 只处理第一个匹配的 target（避免多 target 重复处理）
+  const target = matching[0];
+  target.statusSink?.({ lastInboundAt: Date.now() });
+  processMessage(message, target).catch((err) => {
+    target.runtime.error?.(
+      `[${target.account.accountId}] WeChat webhook failed: ${String(err)}`,
+    );
+  });
 
   res.statusCode = 200;
   res.end("ok");
-  if (firstTarget) {
-    firstTarget.runtime.log?.(
-      `[wechat] webhook accepted sender=${message.fromUser} content=${message.content.slice(0, 50)}...`,
-    );
-  }
+  target.runtime.log?.(
+    `[wechat] webhook accepted sender=${message.fromUser} content=${message.content.slice(0, 50)}...`,
+  );
   return true;
 }
 
@@ -382,7 +414,7 @@ async function processMessage(
 }
 
 export function startWechatMonitor(options: WechatMonitorOptions): () => void {
-  const { account, config, runtime, abortSignal, statusSink, webhookPath, webhookSecret } = options;
+  const { account, config, runtime, statusSink, webhookPath, webhookSecret } = options;
   const core = getWechatRuntime();
   const path = webhookPath ?? account.config.webhookPath ?? DEFAULT_WEBHOOK_PATH;
 
@@ -396,11 +428,6 @@ export function startWechatMonitor(options: WechatMonitorOptions): () => void {
     path,
     secret: webhookSecret ?? account.config.webhookSecret,
     statusSink,
-  });
-
-  abortSignal.addEventListener("abort", () => {
-    runtime.log?.(`[${account.accountId}] Stopping WeChat webhook monitor`);
-    unregister();
   });
 
   return unregister;
