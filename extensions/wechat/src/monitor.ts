@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ClawdbotConfig } from "clawdbot/plugin-sdk";
 import type { ResolvedWechatWorkAccount, WechatWorkConfig } from "./channel.js";
 import { getWechatRuntime } from "./runtime.js";
+import { recordUser, syncUsersMd } from "./user-directory.js";
 
 export type WechatRuntimeEnv = {
   log?: (message: string) => void;
@@ -255,6 +256,15 @@ async function processMessage(
   }
 
   runtime.log?.(`[wechat] processing message from=${message.fromUser} text=${text}`);
+
+  // 记录用户到目录
+  try {
+    recordUser({ userId: message.fromUser });
+    syncUsersMd(); // 同步到 users.md 文件
+    runtime.log?.(`[wechat] recorded user: ${message.fromUser}`);
+  } catch (err) {
+    runtime.error?.(`[wechat] failed to record user: ${err}`);
+  }
 
   // Check DM policy
   const dmPolicy = account.config.dmPolicy ?? "pairing";
