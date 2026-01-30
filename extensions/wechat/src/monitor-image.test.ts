@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { describe, it, expect } from "vitest";
 
 // Test image message type structure
 describe("WechatInboundMessage image fields", () => {

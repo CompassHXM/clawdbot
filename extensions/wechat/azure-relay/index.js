@@ -255,6 +255,12 @@ async function downloadMedia(mediaId, accessToken, context) {
   try {
     const response = await fetch(url);
     
+    // 检查 HTTP 状态
+    if (!response.ok) {
+      context.error(`media/get HTTP error: ${response.status} ${response.statusText}`);
+      return null;
+    }
+    
     // 检查是否返回错误 JSON
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
@@ -357,32 +363,37 @@ async function forwardToClawdbot(message, config, context) {
 
   // 带重试的 webhook 调用
   for (let attempt = 1; attempt <= WEBHOOK_MAX_RETRIES; attempt++) {
+    context.log(`Forwarding to Clawdbot (attempt ${attempt}/${WEBHOOK_MAX_RETRIES}): ${config.webhookUrl}`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+    
     try {
-      context.log(`Forwarding to Clawdbot (attempt ${attempt}/${WEBHOOK_MAX_RETRIES}): ${config.webhookUrl}`);
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
-      
-      try {
-        const response = await fetch(config.webhookUrl, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
+      const response = await fetch(config.webhookUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
 
-        if (response.ok) {
-          context.log(`Clawdbot webhook success: ${response.status}`);
-          return true;
-        }
-        
-        context.warn(`Webhook attempt ${attempt} failed: ${response.status} ${response.statusText}`);
-      } catch (err) {
-        const errorMsg = err.name === "AbortError" ? "timeout" : err.message;
-        context.warn(`Webhook attempt ${attempt} error: ${errorMsg}`);
-      } finally {
-        clearTimeout(timeoutId);
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        context.log(`Clawdbot webhook success: ${response.status}`);
+        return true;
       }
+      
+      context.warn(`Webhook attempt ${attempt} failed: ${response.status} ${response.statusText}`);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      let errorMsg;
+      if (err instanceof Error) {
+        errorMsg = err.name === "AbortError" ? "timeout" : err.message;
+      } else {
+        errorMsg = String(err);
+      }
+      context.warn(`Webhook attempt ${attempt} error: ${errorMsg}`);
+    }
     
     // 等待后重试 (递增延迟: 1s, 2s, 3s)
     if (attempt < WEBHOOK_MAX_RETRIES) {
