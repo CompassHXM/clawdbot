@@ -6,16 +6,14 @@ This guide covers operating a source-built Moltbot instance on a Linux VM with s
 
 | Purpose | Path |
 |---------|------|
-| Source directory | `/home/<user>/clawdbot-fork` |
 | Config file | `~/.config/moltbot/moltbot.json` |
 | Systemd service | `~/.config/systemd/user/moltbot-gateway.service` |
-| Workspace | `~/clawd` |
 | Logs | `journalctl --user -u moltbot-gateway` |
 
 ## Building from Source
 
 ```bash
-cd ~/clawdbot-fork
+cd <source-directory>
 
 # Install dependencies
 pnpm install
@@ -67,7 +65,7 @@ The `-o cat` flag removes systemd prefixes (timestamp, hostname, process ID), sh
 ## TUI (Terminal UI)
 
 ```bash
-cd ~/clawdbot-fork
+cd <source-directory>
 
 # Start TUI (connects to running gateway)
 pnpm tui
@@ -86,33 +84,6 @@ nano ~/.config/moltbot/moltbot.json
 systemctl --user restart moltbot-gateway
 ```
 
-Backups are automatically saved as `moltbot.json.bak.*`.
-
-## Git Workflow (Fork)
-
-When working with a forked repository:
-
-```bash
-cd ~/clawdbot-fork
-
-# Sync upstream before pushing
-git fetch upstream
-git checkout main
-git merge upstream/main
-git push origin main
-
-git checkout develop
-git merge main
-git push origin develop
-
-# Create feature branch
-git checkout develop
-git checkout -b feature/your-feature
-# ... develop ...
-git push origin feature/your-feature
-# Create PR on GitHub
-```
-
 ## Quick Reference
 
 ```bash
@@ -123,7 +94,7 @@ ps aux | grep moltbot-gateway
 ss -tlnp | grep 3000
 
 # Full rebuild and deploy
-cd ~/clawdbot-fork && pnpm build && systemctl --user restart moltbot-gateway
+cd <source-directory> && pnpm build && systemctl --user restart moltbot-gateway
 ```
 
 ## Troubleshooting
@@ -135,22 +106,14 @@ cd ~/clawdbot-fork && pnpm build && systemctl --user restart moltbot-gateway
 journalctl --user -u moltbot-gateway -n 50 -o cat
 
 # Run manually to see errors
-cd ~/clawdbot-fork
+cd <source-directory>
 node dist/index.js gateway --port 3000
-```
-
-### Config Errors
-
-```bash
-# Restore from backup
-cp ~/.config/moltbot/moltbot.json.bak ~/.config/moltbot/moltbot.json
-systemctl --user restart moltbot-gateway
 ```
 
 ### Build Failures
 
 ```bash
-cd ~/clawdbot-fork
+cd <source-directory>
 pnpm install  # Reinstall dependencies
 pnpm build    # Rebuild
 ```
