@@ -234,10 +234,109 @@ function generateNonceStr(length = 16) {
 }
 
 // ============================================================================
+// 媒体下载
+// ============================================================================
+
+// 图片大小限制 (5MB)
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+
+/**
+ * 下载媒体文件
+ * @param {string} mediaId - 媒体文件 ID
+ * @param {string} accessToken - access_token
+ * @param {object} context - Azure Function context
+ * @returns {{ base64: string, mimeType: string } | null}
+ */
+async function downloadMedia(mediaId, accessToken, context) {
+  const url = `${WECHAT_API}/media/get?access_token=${accessToken}&media_id=${mediaId}`;
+  
+  context.log(`Downloading media: ${mediaId}`);
+  
+  try {
+    const response = await fetch(url);
+    
+    // 检查 HTTP 状态
+    if (!response.ok) {
+      context.error(`media/get HTTP error: ${response.status} ${response.statusText}`);
+      return null;
+    }
+    
+    // 检查是否返回错误 JSON
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const error = await response.json();
+      context.error(`media/get API error: ${error.errmsg} (${error.errcode})`);
+      return null;
+    }
+    
+    // 检查文件大小
+    const contentLength = response.headers.get("content-length");
+    if (contentLength && parseInt(contentLength) > MAX_IMAGE_SIZE) {
+      context.error(`Media too large: ${contentLength} bytes (max: ${MAX_IMAGE_SIZE})`);
+      return null;
+    }
+    
+    // 获取图片数据
+    const buffer = await response.arrayBuffer();
+    
+    // 二次检查实际大小
+    if (buffer.byteLength > MAX_IMAGE_SIZE) {
+      context.error(`Media too large after download: ${buffer.byteLength} bytes`);
+      return null;
+    }
+    
+    const base64 = Buffer.from(buffer).toString("base64");
+    const mimeType = contentType.split(";")[0].trim() || "image/jpeg";
+    
+    const sizeKB = Math.round(buffer.byteLength / 1024);
+    context.log(`Downloaded media: ${mimeType}, ${sizeKB}KB`);
+    
+    return { base64, mimeType };
+  } catch (err) {
+    context.error(`Failed to download media: ${err}`);
+    return null;
+  }
+}
+
+// ============================================================================
 // Clawdbot 转发
 // ============================================================================
 
+// 重试配置
+const WEBHOOK_MAX_RETRIES = 3;
+const WEBHOOK_TIMEOUT_MS = 15000;
+
+/**
+ * 延迟函数
+ */
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * 转发消息到 Clawdbot (带重试)
+ */
 async function forwardToClawdbot(message, config, context) {
+  let imageBase64 = null;
+  let imageMimeType = null;
+  
+  // 如果是图片消息，下载图片
+  if (message.MsgType === "image" && message.MediaId) {
+    try {
+      const accessToken = await getAccessToken(config.corpId, config.secret, context);
+      const media = await downloadMedia(message.MediaId, accessToken, context);
+      if (media) {
+        imageBase64 = media.base64;
+        imageMimeType = media.mimeType;
+      } else {
+        context.warn("Failed to download image, continuing without image data");
+      }
+    } catch (err) {
+      context.error(`Image download error: ${err}`);
+      // 继续处理，只是不带图片
+    }
+  }
+  
   const payload = {
     type: "wechat-work-message",
     fromUser: message.FromUserName,
@@ -252,6 +351,9 @@ async function forwardToClawdbot(message, config, context) {
     eventKey: message.EventKey,
     picUrl: message.PicUrl,
     mediaId: message.MediaId,
+    // 图片数据 (仅当成功下载时)
+    imageBase64: imageBase64,
+    imageMimeType: imageMimeType,
   };
 
   const headers = { "Content-Type": "application/json" };
@@ -259,25 +361,50 @@ async function forwardToClawdbot(message, config, context) {
     headers["X-Webhook-Secret"] = config.webhookSecret;
   }
 
-  try {
-    context.log("Forwarding to Clawdbot: " + config.webhookUrl);
-    const response = await fetch(config.webhookUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
+  // 带重试的 webhook 调用
+  for (let attempt = 1; attempt <= WEBHOOK_MAX_RETRIES; attempt++) {
+    context.log(`Forwarding to Clawdbot (attempt ${attempt}/${WEBHOOK_MAX_RETRIES}): ${config.webhookUrl}`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+    
+    try {
+      const response = await fetch(config.webhookUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      context.error("Clawdbot webhook failed: " + response.status + " " + response.statusText);
-      return false;
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        context.log(`Clawdbot webhook success: ${response.status}`);
+        return true;
+      }
+      
+      context.warn(`Webhook attempt ${attempt} failed: ${response.status} ${response.statusText}`);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      let errorMsg;
+      if (err instanceof Error) {
+        errorMsg = err.name === "AbortError" ? "timeout" : err.message;
+      } else {
+        errorMsg = String(err);
+      }
+      context.warn(`Webhook attempt ${attempt} error: ${errorMsg}`);
     }
-
-    context.log("Clawdbot webhook success: " + response.status);
-    return true;
-  } catch (err) {
-    context.error("Clawdbot webhook error: " + err);
-    return false;
+    
+    // 等待后重试 (递增延迟: 1s, 2s, 3s)
+    if (attempt < WEBHOOK_MAX_RETRIES) {
+      const waitMs = attempt * 1000;
+      context.log(`Waiting ${waitMs}ms before retry...`);
+      await delay(waitMs);
+    }
   }
+  
+  context.error(`All ${WEBHOOK_MAX_RETRIES} webhook attempts failed`);
+  return false;
 }
 
 // ============================================================================
