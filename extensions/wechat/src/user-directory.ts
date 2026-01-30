@@ -38,6 +38,43 @@ export function resolveUserDirectoryPath(workspacePath?: string): string {
 }
 
 /**
+ * 标准化用户目录（迁移旧数据）
+ * - 将所有 key 转为小写
+ * - 合并重复记录
+ * - 确保 messageCount 有值
+ */
+function normalizeDirectory(data: WechatUserDirectory): WechatUserDirectory {
+  const normalized: Record<string, WechatUserEntry> = {};
+
+  for (const [key, entry] of Object.entries(data.users)) {
+    const normalizedKey = key.toLowerCase();
+
+    // 确保 messageCount 有值
+    if (entry.messageCount === undefined || entry.messageCount === null) {
+      entry.messageCount = 1;
+    }
+
+    const existing = normalized[normalizedKey];
+    if (existing) {
+      // 合并重复记录：保留更多信息的那个
+      existing.firstSeenAt = Math.min(existing.firstSeenAt, entry.firstSeenAt);
+      existing.lastSeenAt = Math.max(existing.lastSeenAt, entry.lastSeenAt);
+      existing.messageCount += entry.messageCount;
+      if (!existing.name && entry.name) existing.name = entry.name;
+      if (!existing.alias && entry.alias) existing.alias = entry.alias;
+      // 保留原始大小写的 userId
+      if (entry.userId && entry.userId !== entry.userId.toLowerCase()) {
+        existing.userId = entry.userId;
+      }
+    } else {
+      normalized[normalizedKey] = { ...entry };
+    }
+  }
+
+  return { version: 1, users: normalized };
+}
+
+/**
  * 加载用户目录
  */
 export function loadUserDirectory(path?: string): WechatUserDirectory {
@@ -56,10 +93,15 @@ export function loadUserDirectory(path?: string): WechatUserDirectory {
   try {
     const content = readFileSync(filePath, "utf8");
     const data = JSON.parse(content) as WechatUserDirectory;
-    directoryCache = {
+    // 标准化数据（处理旧格式）
+    directoryCache = normalizeDirectory({
       version: data.version ?? 1,
       users: data.users ?? {},
-    };
+    });
+    // 如果有变化，保存标准化后的数据
+    if (JSON.stringify(data.users) !== JSON.stringify(directoryCache.users)) {
+      saveUserDirectory(directoryCache);
+    }
     return directoryCache;
   } catch (err) {
     console.warn(`[wechat] Failed to load user directory: ${err}`);
