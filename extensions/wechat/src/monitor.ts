@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { ClawdbotConfig } from "clawdbot/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { ResolvedWechatWorkAccount, WechatWorkConfig } from "./channel.js";
 import { getWechatRuntime } from "./runtime.js";
 import { recordUser, syncUsersMd } from "./user-directory.js";
@@ -12,7 +12,7 @@ export type WechatRuntimeEnv = {
 
 export type WechatMonitorOptions = {
   account: ResolvedWechatWorkAccount;
-  config: ClawdbotConfig;
+  config: OpenClawConfig;
   runtime: WechatRuntimeEnv;
   abortSignal: AbortSignal;
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
@@ -24,7 +24,7 @@ const DEFAULT_WEBHOOK_PATH = "/wechat-webhook";
 
 type WebhookTarget = {
   account: ResolvedWechatWorkAccount;
-  config: ClawdbotConfig;
+  config: OpenClawConfig;
   runtime: WechatRuntimeEnv;
   core: ReturnType<typeof getWechatRuntime>;
   path: string;

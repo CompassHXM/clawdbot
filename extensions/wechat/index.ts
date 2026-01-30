@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { ClawdbotPluginApi } from "clawdbot/plugin-sdk";
-import { emptyPluginConfigSchema } from "clawdbot/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 import { wechatPlugin } from "./src/channel.js";
 import { setWechatRuntime } from "./src/runtime.js";
@@ -12,7 +12,7 @@ const plugin = {
   name: "WeChat",
   description: "WeChat Work (企业微信) channel plugin",
   configSchema: emptyPluginConfigSchema(),
-  register(api: ClawdbotPluginApi) {
+  register(api: OpenClawPluginApi) {
     setWechatRuntime(api.runtime);
     api.registerChannel({ plugin: wechatPlugin });
     

@@ -3,8 +3,8 @@ import {
   DEFAULT_ACCOUNT_ID,
   normalizeAccountId,
   type ChannelPlugin,
-  type ClawdbotConfig,
-} from "clawdbot/plugin-sdk";
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk";
 import { z } from "zod";
 
 import { getWechatRuntime } from "./runtime.js";
@@ -133,14 +133,14 @@ export async function sendWorkWechatMessage(params: {
   }
 }
 
-function listWechatWorkAccountIds(cfg: ClawdbotConfig): string[] {
+function listWechatWorkAccountIds(cfg: OpenClawConfig): string[] {
   const section = cfg.channels?.wechat;
   if (!section) return [];
   return [DEFAULT_ACCOUNT_ID];
 }
 
 function resolveWechatWorkAccount(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   accountId?: string | null;
 }): ResolvedWechatWorkAccount {
   const { cfg, accountId } = params;
