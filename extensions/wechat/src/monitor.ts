@@ -139,6 +139,11 @@ type WechatInboundMessage = {
   agentId?: string;
   createTime?: string;
   timestamp?: number;
+  // 图片相关字段
+  picUrl?: string;
+  mediaId?: string;
+  imageBase64?: string;
+  imageMimeType?: string;
 };
 
 function normalizeWechatMessage(payload: Record<string, unknown>): WechatInboundMessage | null {
@@ -160,6 +165,11 @@ function normalizeWechatMessage(payload: Record<string, unknown>): WechatInbound
     agentId: readString(payload, "agentId"),
     createTime: readString(payload, "createTime"),
     timestamp: typeof payload.timestamp === "number" ? payload.timestamp : undefined,
+    // 图片相关字段
+    picUrl: readString(payload, "picUrl"),
+    mediaId: readString(payload, "mediaId"),
+    imageBase64: readString(payload, "imageBase64"),
+    imageMimeType: readString(payload, "imageMimeType"),
   };
 }
 
@@ -179,7 +189,7 @@ export async function handleWechatWebhookRequest(
     return true;
   }
 
-  const body = await readJsonBody(req, 1024 * 1024);
+  const body = await readJsonBody(req, 10 * 1024 * 1024); // 10MB to accommodate base64 images
   if (!body.ok) {
     res.statusCode = body.error === "payload too large" ? 413 : 400;
     res.end(body.error ?? "invalid payload");
@@ -244,18 +254,41 @@ async function processMessage(
 ): Promise<void> {
   const { account, config, runtime, core, statusSink } = target;
 
-  if (message.msgType !== "text") {
-    runtime.log?.(`[wechat] skipping non-text message type=${message.msgType}`);
+  // 支持的消息类型
+  const supportedTypes = ["text", "image"];
+  if (!supportedTypes.includes(message.msgType)) {
+    runtime.log?.(`[wechat] skipping unsupported message type=${message.msgType}`);
     return;
   }
 
-  const text = message.content.trim();
-  if (!text) {
+  // 构建消息文本和图片
+  let text = message.content?.trim() || "";
+  const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+
+  if (message.msgType === "image") {
+    if (message.imageBase64 && message.imageMimeType) {
+      images.push({
+        type: "image",
+        data: message.imageBase64,
+        mimeType: message.imageMimeType,
+      });
+      // 图片消息如果没有文字，使用占位符
+      if (!text) {
+        text = "[图片]";
+      }
+      runtime.log?.(`[wechat] image message: mimeType=${message.imageMimeType}, size=${Math.round(message.imageBase64.length * 0.75 / 1024)}KB`);
+    } else {
+      runtime.error?.("[wechat] image message missing base64 data, skipping");
+      return;
+    }
+  }
+
+  if (!text && images.length === 0) {
     runtime.log?.("[wechat] skipping empty message");
     return;
   }
 
-  runtime.log?.(`[wechat] processing message from=${message.fromUser} text=${text}`);
+  runtime.log?.(`[wechat] processing message from=${message.fromUser} type=${message.msgType} images=${images.length}`);
 
   // 记录用户到目录
   try {
@@ -418,6 +451,8 @@ async function processMessage(
         runtime.error?.(`[wechat] ${info.kind} reply failed: ${String(err)}`);
       },
     },
+    // 传递图片给 Agent
+    replyOptions: images.length > 0 ? { images } : undefined,
   });
 
   runtime.log?.(`[wechat] message dispatched to session ${route.sessionKey}`);
