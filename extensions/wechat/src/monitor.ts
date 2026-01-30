@@ -278,8 +278,22 @@ async function processMessage(
       }
       runtime.log?.(`[wechat] image message: mimeType=${message.imageMimeType}, size=${Math.round(message.imageBase64.length * 0.75 / 1024)}KB`);
     } else {
-      runtime.error?.("[wechat] image message missing base64 data, skipping");
-      return;
+      // 图片数据缺失时优雅降级，保留消息而不是丢弃
+      const metaParts: string[] = [];
+      if (message.picUrl) {
+        metaParts.push(`picUrl=${message.picUrl}`);
+      }
+      if (message.mediaId) {
+        metaParts.push(`mediaId=${message.mediaId}`);
+      }
+      const metaSuffix = metaParts.length > 0 ? ` (${metaParts.join(", ")})` : "";
+      runtime.error?.(`[wechat] image message missing base64 data, continuing without image data${metaSuffix}`);
+      // 没有图片数据时，使用占位符文本保留消息
+      if (!text) {
+        text = metaParts.length > 0
+          ? `[图片不可用] ${metaParts.join(" ")}`
+          : "[图片不可用]";
+      }
     }
   }
 

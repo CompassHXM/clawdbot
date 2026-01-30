@@ -363,25 +363,26 @@ async function forwardToClawdbot(message, config, context) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
       
-      const response = await fetch(config.webhookUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      
-      clearTimeout(timeoutId);
+      try {
+        const response = await fetch(config.webhookUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
 
-      if (response.ok) {
-        context.log(`Clawdbot webhook success: ${response.status}`);
-        return true;
+        if (response.ok) {
+          context.log(`Clawdbot webhook success: ${response.status}`);
+          return true;
+        }
+        
+        context.warn(`Webhook attempt ${attempt} failed: ${response.status} ${response.statusText}`);
+      } catch (err) {
+        const errorMsg = err.name === "AbortError" ? "timeout" : err.message;
+        context.warn(`Webhook attempt ${attempt} error: ${errorMsg}`);
+      } finally {
+        clearTimeout(timeoutId);
       }
-      
-      context.warn(`Webhook attempt ${attempt} failed: ${response.status} ${response.statusText}`);
-    } catch (err) {
-      const errorMsg = err.name === "AbortError" ? "timeout" : err.message;
-      context.warn(`Webhook attempt ${attempt} error: ${errorMsg}`);
-    }
     
     // 等待后重试 (递增延迟: 1s, 2s, 3s)
     if (attempt < WEBHOOK_MAX_RETRIES) {
