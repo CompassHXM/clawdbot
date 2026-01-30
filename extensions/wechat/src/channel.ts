@@ -8,6 +8,11 @@ import {
 import { z } from "zod";
 
 import { getWechatRuntime } from "./runtime.js";
+import {
+  listUsers,
+  resolveUserId,
+  type WechatUserEntry,
+} from "./user-directory.js";
 
 // 企业微信 API 基础 URL
 const WORK_WECHAT_API = "https://qyapi.weixin.qq.com/cgi-bin";
@@ -152,6 +157,60 @@ function resolveWechatWorkAccount(params: {
   };
 }
 
+/**
+ * 检查是否像 WeChat Work 目标 ID
+ * - 纯字母数字（企业微信 UserID 通常是这种格式）
+ * - wechat:userId 格式
+ */
+function looksLikeWechatTargetId(target: string): boolean {
+  const trimmed = target.trim();
+  if (!trimmed) return false;
+
+  // wechat:xxx 格式
+  if (/^wechat:/i.test(trimmed)) return true;
+
+  // 企业微信 UserID 通常是字母数字组合，可能包含下划线
+  // 支持中文用户名作为查找目标
+  return /^[\w\u4e00-\u9fa5-]+$/i.test(trimmed);
+}
+
+/**
+ * 规范化 WeChat 消息目标
+ */
+function normalizeWechatMessagingTarget(target: string): string | null {
+  const trimmed = target.trim();
+  if (!trimmed) return null;
+
+  // 移除 wechat: 前缀
+  const cleaned = trimmed.replace(/^wechat:/i, "").trim();
+  if (!cleaned) return null;
+
+  return cleaned;
+}
+
+/**
+ * 用户目录条目转换为 ChannelDirectoryEntry
+ */
+function userEntryToDirectoryEntry(entry: WechatUserEntry): {
+  kind: "user";
+  id: string;
+  name?: string;
+  raw?: Record<string, unknown>;
+} {
+  return {
+    kind: "user",
+    id: entry.userId,
+    name: entry.alias ?? entry.name,
+    raw: {
+      userId: entry.userId,
+      alias: entry.alias,
+      firstSeenAt: entry.firstSeenAt,
+      lastSeenAt: entry.lastSeenAt,
+      messageCount: entry.messageCount,
+    },
+  };
+}
+
 export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
   id: "wechat",
   meta: {
@@ -183,10 +242,19 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
       enabled: account.enabled,
       configured: Boolean(account.corpId && account.agentId && account.secret),
     }),
+    resolveAllowFrom: ({ cfg }) => {
+      const section = cfg.channels?.wechat as WechatWorkConfig | undefined;
+      return section?.allowFrom ?? [];
+    },
+    formatAllowFrom: ({ allowFrom }) =>
+      allowFrom
+        .map((entry) => String(entry).trim())
+        .filter(Boolean)
+        .map((entry) => entry.toLowerCase()),
   },
   setup: {
     resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
-    applyAccountConfig: ({ cfg, accountId, input }) => {
+    applyAccountConfig: ({ cfg }) => {
       return {
         ...cfg,
         channels: {
@@ -199,10 +267,89 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
       };
     },
   },
+  messaging: {
+    normalizeTarget: normalizeWechatMessagingTarget,
+    targetResolver: {
+      looksLikeId: looksLikeWechatTargetId,
+      hint: "<userId|userName|wechat:userId>",
+    },
+  },
+  directory: {
+    self: async () => null, // WeChat Work 没有 "self" 概念
+    listPeers: async (params) => {
+      // 从用户目录获取已知用户
+      const users = listUsers({
+        query: params.query ?? undefined,
+        limit: params.limit ?? undefined,
+      });
+      return users.map(userEntryToDirectoryEntry);
+    },
+    listGroups: async () => {
+      // WeChat Work 当前只支持私聊
+      return [];
+    },
+  },
   outbound: {
     deliveryMode: "direct",
     textChunkLimit: 2048, // 企业微信文本消息限制
-    sendText: async ({ to, text, accountId, cfg }) => {
+    resolveTarget: ({ to, allowFrom, mode }) => {
+      const trimmed = to?.trim() ?? "";
+      const allowListRaw = (allowFrom ?? []).map((entry) => String(entry).trim()).filter(Boolean);
+      const hasWildcard = allowListRaw.includes("*");
+      const allowList = allowListRaw.filter((entry) => entry !== "*");
+
+      if (trimmed) {
+        // 尝试解析目标 userId
+        const resolved = resolveUserId(trimmed);
+        if (resolved) {
+          // 对于 explicit 模式，直接返回解析后的 userId
+          if (mode === "explicit") {
+            return { ok: true, to: resolved };
+          }
+          // 对于 implicit/heartbeat 模式，检查是否在 allowFrom 中
+          if (hasWildcard || allowList.length === 0) {
+            return { ok: true, to: resolved };
+          }
+          const resolvedLower = resolved.toLowerCase();
+          if (allowList.some((entry) => entry.toLowerCase() === resolvedLower)) {
+            return { ok: true, to: resolved };
+          }
+          // 不在 allowList 中，fallback 到第一个允许的用户
+          if (allowList.length > 0) {
+            const fallbackResolved = resolveUserId(allowList[0]);
+            if (fallbackResolved) {
+              return { ok: true, to: fallbackResolved };
+            }
+          }
+          return { ok: true, to: resolved };
+        }
+        // 无法解析，但仍然返回原始值（可能是新用户）
+        return { ok: true, to: trimmed };
+      }
+
+      // 没有提供 target，尝试从 allowList 获取
+      if (allowList.length > 0) {
+        const resolved = resolveUserId(allowList[0]);
+        if (resolved) {
+          return { ok: true, to: resolved };
+        }
+        return { ok: true, to: allowList[0] };
+      }
+
+      // 尝试从用户目录获取最近活跃的用户
+      const recentUsers = listUsers({ limit: 1 });
+      if (recentUsers.length > 0) {
+        return { ok: true, to: recentUsers[0].userId };
+      }
+
+      return {
+        ok: false,
+        error: new Error(
+          "WeChat Work target required: provide userId, userName, or configure allowFrom",
+        ),
+      };
+    },
+    sendText: async ({ to, text, cfg }) => {
       const section = cfg?.channels?.wechat as WechatWorkConfig | undefined;
       const corpId = section?.corpId;
       const agentId = section?.agentId;
@@ -273,7 +420,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
         return { ok: false, error: String(err) };
       }
     },
-    buildAccountSnapshot: ({ account, cfg, runtime, probe }) => {
+    buildAccountSnapshot: ({ account, runtime, probe }) => {
       return {
         accountId: account.accountId,
         name: account.name,
