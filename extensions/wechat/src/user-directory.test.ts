@@ -158,14 +158,15 @@ describe("user-directory", () => {
     it("should set alias for existing user", () => {
       recordUser({ userId: "xiaoming" });
       const result = setUserAlias("xiaoming", "ming");
-      expect(result).toBe(true);
+      expect(result).toBeDefined();
+      expect(result?.alias).toBe("ming");
       const found = findUserByName("ming");
       expect(found?.userId).toBe("xiaoming");
     });
 
-    it("should return false for unknown user", () => {
+    it("should return undefined for unknown user", () => {
       const result = setUserAlias("unknown", "alias");
-      expect(result).toBe(false);
+      expect(result).toBeUndefined();
     });
   });
 
