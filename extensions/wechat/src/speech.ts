@@ -32,8 +32,8 @@ export type TranscribeOptions = {
   speechRegion: string;
   /** Audio data as Buffer */
   audioBuffer: Buffer;
-  /** Audio format: "amr" | "wav" | "mp3" | "ogg" */
-  audioFormat?: string;
+  /** Audio format: "amr" (WeChat voice) or "wav" (PCM). Default: "amr" */
+  audioFormat?: "amr" | "wav";
   /** Candidate languages for auto-detection (default: ["zh-CN", "en-US"]) */
   candidateLanguages?: string[];
 };

@@ -312,8 +312,8 @@ function convertToAmr(
 }
 
 /**
- * 发送媒体消息 (独立函数，供 monitor.ts 调用)
- * 检测音频文件自动转为语音消息
+ * 发送媒体消息
+ * 检测音频文件自动转为语音消息，支持 fallback 到文本
  */
 export async function sendMedia(params: {
   corpId: string;
@@ -322,8 +322,10 @@ export async function sendMedia(params: {
   toUser: string;
   mediaUrl: string;
   text?: string;
+  /** 如果语音发送失败，是否 fallback 到文本消息 */
+  fallbackToText?: boolean;
 }): Promise<{ ok: boolean; messageId?: string; error?: string }> {
-  const { corpId, secret, agentId, toUser, mediaUrl, text } = params;
+  const { corpId, secret, agentId, toUser, mediaUrl, text, fallbackToText = false } = params;
 
   // 检查是否是本地音频文件 (TTS 输出)
   if (mediaUrl && !mediaUrl.startsWith("http") && isAudioFile(mediaUrl)) {
@@ -331,6 +333,10 @@ export async function sendMedia(params: {
     const convertResult = convertToAmr(mediaUrl);
     if (!convertResult.ok) {
       console.error(`[wechat] voice conversion failed: ${convertResult.error}`);
+      if (fallbackToText) {
+        const content = text || "[语音转换失败]";
+        return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+      }
       return { ok: false, error: convertResult.error };
     }
 
@@ -346,6 +352,10 @@ export async function sendMedia(params: {
 
       if (!uploadResult.ok || !uploadResult.mediaId) {
         console.error(`[wechat] voice upload failed: ${uploadResult.error}`);
+        if (fallbackToText) {
+          const content = text || "[语音上传失败]";
+          return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+        }
         return { ok: false, error: uploadResult.error ?? "Upload failed" };
       }
 
@@ -630,71 +640,15 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
         };
       }
 
-      // 检查是否是本地音频文件 (TTS 输出)
-      if (mediaUrl && !mediaUrl.startsWith("http") && isAudioFile(mediaUrl)) {
-        // 转换为 AMR 格式
-        const convertResult = convertToAmr(mediaUrl);
-        if (!convertResult.ok) {
-          // 转换失败，fallback 到文本
-          console.error(`[wechat] voice conversion failed: ${convertResult.error}`);
-          const content = text || "[语音转换失败]";
-          const result = await sendWorkWechatMessage({
-            corpId,
-            secret,
-            agentId,
-            toUser: to,
-            content,
-          });
-          return { channel: "wechat", ...result };
-        }
-
-        try {
-          // 上传 AMR 到企业微信
-          const uploadResult = await uploadMedia({
-            corpId,
-            secret,
-            type: "voice",
-            filePath: convertResult.amrPath,
-            fileName: "voice.amr",
-          });
-
-          if (!uploadResult.ok || !uploadResult.mediaId) {
-            console.error(`[wechat] voice upload failed: ${uploadResult.error}`);
-            const content = text || "[语音上传失败]";
-            const result = await sendWorkWechatMessage({
-              corpId,
-              secret,
-              agentId,
-              toUser: to,
-              content,
-            });
-            return { channel: "wechat", ...result };
-          }
-
-          // 发送语音消息
-          const result = await sendWorkWechatVoice({
-            corpId,
-            secret,
-            agentId,
-            toUser: to,
-            mediaId: uploadResult.mediaId,
-          });
-
-          return { channel: "wechat", ...result };
-        } finally {
-          // 清理临时文件
-          convertResult.cleanup();
-        }
-      }
-
-      // 非音频文件，fallback 到文本方式发送媒体链接
-      const content = text ? `${text}\n${mediaUrl}` : mediaUrl ?? "";
-      const result = await sendWorkWechatMessage({
+      // 使用公共的 sendMedia 函数，启用 fallback 到文本
+      const result = await sendMedia({
         corpId,
         secret,
         agentId,
         toUser: to,
-        content,
+        mediaUrl: mediaUrl ?? "",
+        text,
+        fallbackToText: true,
       });
 
       return { channel: "wechat", ...result };
