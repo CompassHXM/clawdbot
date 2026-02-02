@@ -32,7 +32,11 @@ export type TranscribeOptions = {
   speechRegion: string;
   /** Audio data as Buffer */
   audioBuffer: Buffer;
-  /** Audio format: "amr" (WeChat voice) or "wav" (PCM). Default: "amr" */
+  /**
+   * Audio format. Default: "amr"
+   * - "amr": WeChat voice format, converted to WAV internally
+   * - "wav": PCM WAV format, sent directly to Azure
+   */
   audioFormat?: "amr" | "wav";
   /** Candidate languages for auto-detection (default: ["zh-CN", "en-US"]) */
   candidateLanguages?: string[];
