@@ -1,3 +1,8 @@
+import { execFileSync } from "node:child_process";
+import { readFileSync, unlinkSync, mkdtempSync, rmdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, extname } from "node:path";
+
 import {
   buildChannelConfigSchema,
   DEFAULT_ACCOUNT_ID,
@@ -131,6 +136,254 @@ export async function sendWorkWechatMessage(params: {
   } catch (err) {
     return { ok: false, error: String(err) };
   }
+}
+
+/**
+ * 发送语音消息
+ */
+export async function sendWorkWechatVoice(params: {
+  corpId: string;
+  secret: string;
+  agentId: string;
+  toUser: string;
+  mediaId: string;
+}): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+  const { corpId, secret, agentId, toUser, mediaId } = params;
+
+  try {
+    const token = await getAccessToken(corpId, secret);
+    const url = `${WORK_WECHAT_API}/message/send?access_token=${token}`;
+
+    const body = {
+      touser: toUser,
+      msgtype: "voice",
+      agentid: Number.parseInt(agentId, 10),
+      voice: { media_id: mediaId },
+    };
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const data = (await response.json()) as {
+      errcode?: number;
+      errmsg?: string;
+      msgid?: string;
+    };
+
+    if (data.errcode && data.errcode !== 0) {
+      return { ok: false, error: `${data.errmsg} (code: ${data.errcode})` };
+    }
+
+    return { ok: true, messageId: data.msgid };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/**
+ * 上传临时素材到企业微信
+ * @param type - 媒体类型: image, voice, video, file
+ * @param filePath - 本地文件路径
+ * @returns media_id (3天有效)
+ */
+export async function uploadMedia(params: {
+  corpId: string;
+  secret: string;
+  type: "image" | "voice" | "video" | "file";
+  filePath: string;
+  fileName?: string;
+}): Promise<{ ok: boolean; mediaId?: string; error?: string }> {
+  const { corpId, secret, type, filePath, fileName } = params;
+
+  try {
+    const token = await getAccessToken(corpId, secret);
+    const url = `${WORK_WECHAT_API}/media/upload?access_token=${token}&type=${type}`;
+
+    // 读取文件
+    const fileBuffer = readFileSync(filePath);
+    const finalFileName = fileName ?? `upload${extname(filePath)}`;
+
+    // 构建 multipart/form-data
+    const boundary = `----WebKitFormBoundary${Date.now().toString(16)}`;
+    const contentType = type === "voice" ? "audio/amr" : "application/octet-stream";
+
+    const header = Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="media"; filename="${finalFileName}"; filelength=${fileBuffer.length}\r\n` +
+      `Content-Type: ${contentType}\r\n\r\n`
+    );
+    const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = Buffer.concat([header, fileBuffer, footer]);
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Content-Length": String(body.length),
+      },
+      body,
+    });
+
+    const data = (await response.json()) as {
+      errcode?: number;
+      errmsg?: string;
+      type?: string;
+      media_id?: string;
+      created_at?: string;
+    };
+
+    if (data.errcode && data.errcode !== 0) {
+      return { ok: false, error: `${data.errmsg} (code: ${data.errcode})` };
+    }
+
+    if (!data.media_id) {
+      return { ok: false, error: "No media_id returned" };
+    }
+
+    return { ok: true, mediaId: data.media_id };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/**
+ * 检测文件是否是音频格式
+ */
+function isAudioFile(filePath: string): boolean {
+  const ext = extname(filePath).toLowerCase();
+  return [".mp3", ".opus", ".ogg", ".wav", ".amr", ".m4a", ".aac"].includes(ext);
+}
+
+/**
+ * 将音频文件转换为 AMR 格式 (企业微信语音要求)
+ * 要求: AMR 格式, ≤2MB, ≤60s
+ */
+function convertToAmr(
+  inputPath: string,
+): { ok: true; amrPath: string; cleanup: () => void } | { ok: false; error: string } {
+  let tempDir: string | null = null;
+  try {
+    tempDir = mkdtempSync(join(tmpdir(), "wechat-voice-"));
+    const amrPath = join(tempDir, "voice.amr");
+
+    // 使用 ffmpeg 转换为 AMR-NB 格式
+    // -ar 8000: AMR 标准采样率
+    // -ac 1: 单声道
+    // -c:a libopencore_amrnb: 明确指定 AMR-NB 编码器
+    execFileSync("ffmpeg", [
+      "-y",
+      "-i", inputPath,
+      "-ar", "8000",
+      "-ac", "1",
+      "-c:a", "libopencore_amrnb",
+      amrPath,
+    ], {
+      timeout: 30000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const cleanup = () => {
+      try {
+        unlinkSync(amrPath);
+        if (tempDir) {
+          rmdirSync(tempDir);
+        }
+      } catch {
+        // ignore cleanup errors
+      }
+    };
+
+    return { ok: true, amrPath, cleanup };
+  } catch (err) {
+    // 清理临时目录
+    if (tempDir) {
+      try {
+        rmdirSync(tempDir, { recursive: true });
+      } catch {
+        // ignore
+      }
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `AMR conversion failed: ${message}` };
+  }
+}
+
+/**
+ * 发送媒体消息
+ * 检测音频文件自动转为语音消息，支持 fallback 到文本
+ */
+export async function sendMedia(params: {
+  corpId: string;
+  secret: string;
+  agentId: string;
+  toUser: string;
+  mediaUrl: string;
+  text?: string;
+  /** 如果语音发送失败，是否 fallback 到文本消息 */
+  fallbackToText?: boolean;
+}): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+  const { corpId, secret, agentId, toUser, mediaUrl, text, fallbackToText = false } = params;
+
+  // 检查是否是本地音频文件 (TTS 输出)
+  if (mediaUrl && !mediaUrl.startsWith("http") && isAudioFile(mediaUrl)) {
+    // 转换为 AMR 格式
+    const convertResult = convertToAmr(mediaUrl);
+    if (!convertResult.ok) {
+      console.error(`[wechat] voice conversion failed: ${convertResult.error}`);
+      if (fallbackToText) {
+        const content = text || "[语音转换失败]";
+        return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+      }
+      return { ok: false, error: convertResult.error };
+    }
+
+    try {
+      // 上传 AMR 到企业微信
+      const uploadResult = await uploadMedia({
+        corpId,
+        secret,
+        type: "voice",
+        filePath: convertResult.amrPath,
+        fileName: "voice.amr",
+      });
+
+      if (!uploadResult.ok || !uploadResult.mediaId) {
+        console.error(`[wechat] voice upload failed: ${uploadResult.error}`);
+        if (fallbackToText) {
+          const content = text || "[语音上传失败]";
+          return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+        }
+        return { ok: false, error: uploadResult.error ?? "Upload failed" };
+      }
+
+      // 发送语音消息
+      const result = await sendWorkWechatVoice({
+        corpId,
+        secret,
+        agentId,
+        toUser,
+        mediaId: uploadResult.mediaId,
+      });
+
+      return result;
+    } finally {
+      // 清理临时文件
+      convertResult.cleanup();
+    }
+  }
+
+  // 非音频文件，发送文本 + 链接
+  const content = text ? `${text}\n${mediaUrl}` : mediaUrl;
+  return sendWorkWechatMessage({
+    corpId,
+    secret,
+    agentId,
+    toUser,
+    content,
+  });
 }
 
 function listWechatWorkAccountIds(cfg: OpenClawConfig): string[] {
@@ -374,8 +627,6 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
       return { channel: "wechat", ...result };
     },
     sendMedia: async ({ to, text, mediaUrl, cfg }) => {
-      // TODO: 实现媒体发送（需要先上传到企业微信获取 media_id）
-      // 暂时用文本方式发送媒体链接
       const section = cfg?.channels?.wechat as WechatWorkConfig | undefined;
       const corpId = section?.corpId;
       const agentId = section?.agentId;
@@ -389,13 +640,15 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
         };
       }
 
-      const content = text ? `${text}\n${mediaUrl}` : mediaUrl ?? "";
-      const result = await sendWorkWechatMessage({
+      // 使用公共的 sendMedia 函数，启用 fallback 到文本
+      const result = await sendMedia({
         corpId,
         secret,
         agentId,
         toUser: to,
-        content,
+        mediaUrl: mediaUrl ?? "",
+        text,
+        fallbackToText: true,
       });
 
       return { channel: "wechat", ...result };
