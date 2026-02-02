@@ -130,6 +130,8 @@ function parseXml(xml) {
     EventKey: extract("EventKey"),
     PicUrl: extract("PicUrl"),
     MediaId: extract("MediaId"),
+    // 语音消息字段
+    Format: extract("Format"),
   };
 }
 
@@ -319,6 +321,8 @@ function delay(ms) {
 async function forwardToClawdbot(message, config, context) {
   let imageBase64 = null;
   let imageMimeType = null;
+  let voiceBase64 = null;
+  let voiceFormat = null;
   
   // 如果是图片消息，下载图片
   if (message.MsgType === "image" && message.MediaId) {
@@ -334,6 +338,24 @@ async function forwardToClawdbot(message, config, context) {
     } catch (err) {
       context.error(`Image download error: ${err}`);
       // 继续处理，只是不带图片
+    }
+  }
+  
+  // 如果是语音消息，下载语音
+  if (message.MsgType === "voice" && message.MediaId) {
+    try {
+      const accessToken = await getAccessToken(config.corpId, config.secret, context);
+      const media = await downloadMedia(message.MediaId, accessToken, context);
+      if (media) {
+        voiceBase64 = media.base64;
+        voiceFormat = message.Format || "amr";
+        context.log(`Voice downloaded: format=${voiceFormat}, size=${Math.round(media.base64.length * 0.75 / 1024)}KB`);
+      } else {
+        context.warn("Failed to download voice, continuing without voice data");
+      }
+    } catch (err) {
+      context.error(`Voice download error: ${err}`);
+      // 继续处理，只是不带语音
     }
   }
   
@@ -354,6 +376,9 @@ async function forwardToClawdbot(message, config, context) {
     // 图片数据 (仅当成功下载时)
     imageBase64: imageBase64,
     imageMimeType: imageMimeType,
+    // 语音数据 (仅当成功下载时)
+    voiceBase64: voiceBase64,
+    voiceFormat: voiceFormat,
   };
 
   const headers = { "Content-Type": "application/json" };

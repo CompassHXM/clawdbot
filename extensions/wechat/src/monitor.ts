@@ -1,8 +1,15 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { appendFileSync } from "node:fs";
+
+// 模块加载时写入日志
+try {
+  appendFileSync("/tmp/wechat-module-load.log", `${new Date().toISOString()} monitor.ts module loaded\n`);
+} catch { /* ignore */ }
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { ResolvedWechatWorkAccount, WechatWorkConfig } from "./channel.js";
 import { getWechatRuntime } from "./runtime.js";
+import { loadSpeechCredentials, transcribeVoice } from "./speech.js";
 import { recordUser, syncUsersMd } from "./user-directory.js";
 
 export type WechatRuntimeEnv = {
@@ -144,6 +151,9 @@ type WechatInboundMessage = {
   mediaId?: string;
   imageBase64?: string;
   imageMimeType?: string;
+  // 语音相关字段
+  voiceBase64?: string;
+  voiceFormat?: string;
 };
 
 function normalizeWechatMessage(payload: Record<string, unknown>): WechatInboundMessage | null {
@@ -170,6 +180,9 @@ function normalizeWechatMessage(payload: Record<string, unknown>): WechatInbound
     mediaId: readString(payload, "mediaId"),
     imageBase64: readString(payload, "imageBase64"),
     imageMimeType: readString(payload, "imageMimeType"),
+    // 语音相关字段
+    voiceBase64: readString(payload, "voiceBase64"),
+    voiceFormat: readString(payload, "voiceFormat"),
   };
 }
 
@@ -242,9 +255,29 @@ export async function handleWechatWebhookRequest(
 
   res.statusCode = 200;
   res.end("ok");
+  
+  // 文件日志 - 用于调试
+  const fs = require("node:fs");
+  const logLine = (msg: string) => {
+    try {
+      fs.appendFileSync("/tmp/wechat-webhook-debug.log", `${new Date().toISOString()} ${msg}\n`);
+    } catch { /* ignore */ }
+  };
+  
+  logLine(`webhook accepted sender=${message.fromUser} type=${message.msgType}`);
+  if (message.msgType === "voice") {
+    logLine(`voice details: voiceBase64=${message.voiceBase64 ? `${Math.round(message.voiceBase64.length * 0.75 / 1024)}KB` : "MISSING"} format=${message.voiceFormat || "unknown"}`);
+  }
+  
   target.runtime.log?.(
-    `[wechat] webhook accepted sender=${message.fromUser} content=${message.content.slice(0, 50)}...`,
+    `[wechat] webhook accepted sender=${message.fromUser} type=${message.msgType} content=${message.content?.slice(0, 50) || "(empty)"}`,
   );
+  // 语音消息额外日志
+  if (message.msgType === "voice") {
+    target.runtime.log?.(
+      `[wechat] voice message details: voiceBase64=${message.voiceBase64 ? `${Math.round(message.voiceBase64.length * 0.75 / 1024)}KB` : "missing"} format=${message.voiceFormat || "unknown"}`,
+    );
+  }
   return true;
 }
 
@@ -255,7 +288,7 @@ async function processMessage(
   const { account, config, runtime, core, statusSink } = target;
 
   // 支持的消息类型
-  const supportedTypes = ["text", "image"];
+  const supportedTypes = ["text", "image", "voice"];
   if (!supportedTypes.includes(message.msgType)) {
     runtime.log?.(`[wechat] skipping unsupported message type=${message.msgType}`);
     return;
@@ -265,7 +298,67 @@ async function processMessage(
   let text = message.content?.trim() || "";
   const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
 
-  if (message.msgType === "image") {
+  if (message.msgType === "voice") {
+    // 语音消息处理 - 写入调试日志
+    const debugLog = (msg: string) => {
+      try {
+        const fs = require("node:fs");
+        fs.appendFileSync("/tmp/wechat-voice-debug.log", `${new Date().toISOString()} ${msg}\n`);
+      } catch { /* ignore */ }
+      runtime.log?.(msg);
+    };
+
+    debugLog(`[wechat] voice message received: voiceBase64=${message.voiceBase64 ? "present" : "missing"}, format=${message.voiceFormat ?? "unknown"}`);
+
+    if (message.voiceBase64) {
+      debugLog(`[wechat] voice message: format=${message.voiceFormat ?? "unknown"}, size=${Math.round(message.voiceBase64.length * 0.75 / 1024)}KB`);
+
+      // 加载 Azure Speech 凭证
+      const credentials = loadSpeechCredentials();
+      if (!credentials) {
+        debugLog("[wechat] Azure Speech credentials not configured");
+        text = "[语音] (无法转写：未配置语音识别服务)";
+      } else {
+        debugLog(`[wechat] credentials loaded, region=${credentials.region}`);
+        // 转写语音
+        const audioBuffer = Buffer.from(message.voiceBase64, "base64");
+        debugLog(`[wechat] audio buffer created, size=${audioBuffer.length} bytes`);
+        
+        try {
+          const result = await transcribeVoice({
+            speechKey: credentials.key,
+            speechRegion: credentials.region,
+            audioBuffer,
+            audioFormat: message.voiceFormat ?? "amr",
+            candidateLanguages: ["zh-CN", "en-US"],
+          });
+
+          debugLog(`[wechat] transcription result: ok=${result.ok}, ${result.ok ? `text="${result.text}"` : `error="${result.error}"`}`);
+
+          if (result.ok) {
+            if (result.text && result.text.trim()) {
+              text = `[语音] ${result.text}`;
+              debugLog(`[wechat] voice transcription success: lang=${result.language}, confidence=${result.confidence?.toFixed(2)}, text="${result.text.slice(0, 50)}..."`);
+            } else {
+              text = "[语音] (转写结果为空)";
+              debugLog(`[wechat] voice transcription returned empty text: lang=${result.language}, confidence=${result.confidence?.toFixed(2)}`);
+            }
+          } else {
+            const errorMsg = result.error;
+            debugLog(`[wechat] voice transcription failed: ${errorMsg}`);
+            text = `[语音] (转写失败: ${errorMsg})`;
+          }
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          debugLog(`[wechat] transcription threw error: ${errMsg}`);
+          text = `[语音] (转写异常: ${errMsg})`;
+        }
+      }
+    } else {
+      debugLog("[wechat] voice message missing base64 data");
+      text = "[语音] (数据不可用)";
+    }
+  } else if (message.msgType === "image") {
     if (message.imageBase64 && message.imageMimeType) {
       images.push({
         type: "image",
@@ -302,19 +395,29 @@ async function processMessage(
     return;
   }
 
-  runtime.log?.(`[wechat] processing message from=${message.fromUser} type=${message.msgType} images=${images.length}`);
+  // 调试日志 - 写入文件
+  const debugLogProcess = (msg: string) => {
+    try {
+      const fs = require("node:fs");
+      fs.appendFileSync("/tmp/wechat-process-debug.log", `${new Date().toISOString()} ${msg}\n`);
+    } catch { /* ignore */ }
+    runtime.log?.(msg);
+  };
+
+  debugLogProcess(`[wechat] processing message from=${message.fromUser} type=${message.msgType} text="${text.slice(0, 50)}..."`);
 
   // 记录用户到目录
   try {
     recordUser({ userId: message.fromUser });
     syncUsersMd(); // 同步到 users.md 文件
-    runtime.log?.(`[wechat] recorded user: ${message.fromUser}`);
+    debugLogProcess(`[wechat] recorded user: ${message.fromUser}`);
   } catch (err) {
     runtime.error?.(`[wechat] failed to record user: ${err}`);
   }
 
   // Check DM policy
   const dmPolicy = account.config.dmPolicy ?? "pairing";
+  debugLogProcess(`[wechat] dmPolicy=${dmPolicy}`);
   const configAllowFrom = (account.config.allowFrom ?? []).map((entry) => String(entry));
   const storeAllowFrom = await core.channel.pairing
     .readAllowFromStore("wechat")
@@ -324,7 +427,7 @@ async function processMessage(
     .filter(Boolean);
 
   if (dmPolicy === "disabled") {
-    runtime.log?.(`[wechat] blocked DM from ${message.fromUser} (dmPolicy=disabled)`);
+    debugLogProcess(`[wechat] blocked DM from ${message.fromUser} (dmPolicy=disabled)`);
     return;
   }
 
@@ -428,46 +531,77 @@ async function processMessage(
     CommandAuthorized: true,
   };
 
+  debugLogProcess(`[wechat] dispatching to session=${route.sessionKey} agent=${route.agentId}`);
+
   // Dispatch reply using the standard pipeline
   const section = config?.channels?.wechat as WechatWorkConfig | undefined;
-  await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-    ctx: ctxPayload,
-    cfg: config,
-    dispatcherOptions: {
-      deliver: async (payload) => {
-        if (!section?.corpId || !section?.agentId || !section?.secret) {
-          runtime.error?.("[wechat] cannot send reply: missing corpId/agentId/secret");
-          return;
-        }
-        const textLimit = 2048;
-        const chunks = core.channel.text.chunkMarkdownText(payload.text ?? "", textLimit);
-        if (!chunks.length && payload.text) chunks.push(payload.text);
-        
-        for (const chunk of chunks) {
-          const { sendWorkWechatMessage } = await import("./channel.js");
-          await sendWorkWechatMessage({
-            corpId: section.corpId,
-            secret: section.secret,
-            agentId: section.agentId,
-            toUser: message.fromUser,
-            content: chunk,
-          });
-          statusSink?.({ lastOutboundAt: Date.now() });
-        }
+  try {
+    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: ctxPayload,
+      cfg: config,
+      dispatcherOptions: {
+        deliver: async (payload) => {
+          debugLogProcess(`[wechat] deliver called: text="${(payload.text ?? "").slice(0, 100)}..." mediaUrl=${payload.mediaUrl ?? "none"}`);
+          if (!section?.corpId || !section?.agentId || !section?.secret) {
+            runtime.error?.("[wechat] cannot send reply: missing corpId/agentId/secret");
+            return;
+          }
+
+          // 如果有 mediaUrl（TTS 音频），使用 sendMedia 发送语音
+          if (payload.mediaUrl) {
+            const { sendMedia } = await import("./channel.js");
+            const result = await sendMedia({
+              corpId: section.corpId,
+              secret: section.secret,
+              agentId: section.agentId,
+              toUser: message.fromUser,
+              mediaUrl: payload.mediaUrl,
+              text: payload.text,
+            });
+            debugLogProcess(`[wechat] sendMedia result: ok=${result.ok} error=${result.error ?? "none"}`);
+            if (result.ok) {
+              statusSink?.({ lastOutboundAt: Date.now() });
+              return;
+            }
+            // 如果语音发送失败，fallback 到文本
+            debugLogProcess(`[wechat] voice send failed, falling back to text`);
+          }
+
+          // 发送文本消息
+          const textLimit = 2048;
+          const chunks = core.channel.text.chunkMarkdownText(payload.text ?? "", textLimit);
+          if (!chunks.length && payload.text) chunks.push(payload.text);
+          
+          for (const chunk of chunks) {
+            const { sendWorkWechatMessage } = await import("./channel.js");
+            await sendWorkWechatMessage({
+              corpId: section.corpId,
+              secret: section.secret,
+              agentId: section.agentId,
+              toUser: message.fromUser,
+              content: chunk,
+            });
+            statusSink?.({ lastOutboundAt: Date.now() });
+          }
+        },
+        onReplyStart: async () => {
+          // WeChat doesn't support typing indicators
+        },
+        onIdle: async () => {
+          // WeChat doesn't support typing indicators
+        },
+        onError: (err, info) => {
+          debugLogProcess(`[wechat] ${info.kind} reply error: ${String(err)}`);
+          runtime.error?.(`[wechat] ${info.kind} reply failed: ${String(err)}`);
+        },
       },
-      onReplyStart: async () => {
-        // WeChat doesn't support typing indicators
-      },
-      onIdle: async () => {
-        // WeChat doesn't support typing indicators
-      },
-      onError: (err, info) => {
-        runtime.error?.(`[wechat] ${info.kind} reply failed: ${String(err)}`);
-      },
-    },
-    // 传递图片给 Agent
-    replyOptions: images.length > 0 ? { images } : undefined,
-  });
+      // 传递图片给 Agent
+      replyOptions: images.length > 0 ? { images } : undefined,
+    });
+    debugLogProcess(`[wechat] dispatch completed for session ${route.sessionKey}`);
+  } catch (err) {
+    debugLogProcess(`[wechat] dispatch threw error: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   runtime.log?.(`[wechat] message dispatched to session ${route.sessionKey}`);
 }
