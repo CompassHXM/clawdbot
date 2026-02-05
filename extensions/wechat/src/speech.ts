@@ -224,13 +224,13 @@ export function loadSpeechCredentials(): { key: string; region: string } | null 
     return { key, region };
   }
 
-  // Try loading from .clawdbot/azure-speech.env
+  // Try loading from ~/.openclaw/azure-speech.env
   try {
     const fs = require("node:fs");
     const path = require("node:path");
     const os = require("node:os");
 
-    const envPath = path.join(os.homedir(), ".clawdbot", "azure-speech.env");
+    const envPath = path.join(os.homedir(), ".openclaw", "azure-speech.env");
     if (fs.existsSync(envPath)) {
       const content = fs.readFileSync(envPath, "utf8");
       const lines = content.split("\n");
@@ -280,17 +280,25 @@ function convertAmrToWav(
     // -ar 16000: 16kHz sample rate (optimal for speech recognition)
     // -ac 1: mono channel
     // -f wav: output format
-    execFileSync("ffmpeg", [
-      "-y", // overwrite output
-      "-i", amrPath,
-      "-ar", "16000",
-      "-ac", "1",
-      "-f", "wav",
-      wavPath,
-    ], {
-      timeout: 10000, // 10 second timeout
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    execFileSync(
+      "ffmpeg",
+      [
+        "-y", // overwrite output
+        "-i",
+        amrPath,
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-f",
+        "wav",
+        wavPath,
+      ],
+      {
+        timeout: 10000, // 10 second timeout
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
 
     // Read converted WAV
     const wavBuffer = readFileSync(wavPath);
