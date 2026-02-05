@@ -58,4 +58,16 @@ describe("splitMediaFromOutput", () => {
     expect(result.mediaUrls).toEqual(["./screenshot.png"]);
     expect(result.text).toBe("");
   });
+
+  it("allows /tmp/ paths for internal tool outputs", () => {
+    const result = splitMediaFromOutput("MEDIA:/tmp/tts-abc123/voice.mp3");
+    expect(result.mediaUrls).toEqual(["/tmp/tts-abc123/voice.mp3"]);
+    expect(result.text).toBe("");
+  });
+
+  it("rejects /tmp/ paths with directory traversal", () => {
+    const result = splitMediaFromOutput("MEDIA:/tmp/../etc/passwd");
+    expect(result.mediaUrls).toBeUndefined();
+    expect(result.text).toBe("MEDIA:/tmp/../etc/passwd");
+  });
 });
