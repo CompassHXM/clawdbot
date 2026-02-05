@@ -8,6 +8,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export type WechatUserEntry = {
@@ -34,11 +35,23 @@ let syncUsersMdTimer: ReturnType<typeof setTimeout> | null = null;
 const SYNC_USERS_MD_DEBOUNCE_MS = 5000; // 5 秒 debounce
 
 /**
+ * 获取 OpenClaw 状态目录路径
+ * 优先级: OPENCLAW_STATE_DIR > CLAWDBOT_STATE_DIR > ~/.openclaw
+ */
+function resolveStateDir(): string {
+  const override = process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim();
+  if (override) {
+    return override;
+  }
+  return join(homedir(), ".openclaw");
+}
+
+/**
  * 获取用户目录文件路径
  */
 export function resolveUserDirectoryPath(workspacePath?: string): string {
-  // 优先使用传入的路径，否则使用默认路径
-  const base = workspacePath ?? process.env.MOLTBOT_WORKSPACE ?? process.cwd();
+  // 优先使用传入的路径，否则使用 OpenClaw 状态目录
+  const base = workspacePath ?? resolveStateDir();
   return join(base, "wechat-users.json");
 }
 
@@ -47,16 +60,19 @@ export function resolveUserDirectoryPath(workspacePath?: string): string {
  * - 将所有 key 转为小写
  * - 合并重复记录
  * - 确保 messageCount 有值
- * 
+ *
  * 注意：此函数不修改输入对象，返回全新的对象
  */
-function normalizeDirectory(data: WechatUserDirectory): { directory: WechatUserDirectory; changed: boolean } {
+function normalizeDirectory(data: WechatUserDirectory): {
+  directory: WechatUserDirectory;
+  changed: boolean;
+} {
   const normalized: Record<string, WechatUserEntry> = {};
   let changed = false;
 
   for (const [key, entry] of Object.entries(data.users)) {
     const normalizedKey = key.toLowerCase();
-    
+
     // 创建 entry 的深拷贝，避免修改原始对象
     const entryCopy: WechatUserEntry = {
       userId: entry.userId,
@@ -96,7 +112,7 @@ function normalizeDirectory(data: WechatUserDirectory): { directory: WechatUserD
     }
   }
 
-  return { 
+  return {
     directory: { version: 1, users: normalized },
     changed,
   };
@@ -127,7 +143,7 @@ export function loadUserDirectory(path?: string): WechatUserDirectory {
       users: data.users ?? {},
     });
     directoryCache = directory;
-    
+
     // 仅当数据实际发生变化时才保存
     if (changed) {
       saveUserDirectory();
@@ -262,7 +278,7 @@ export function findUserByName(nameOrAlias: string): WechatUserEntry | null {
  * - 直接 userId
  * - 用户名/别名
  * - wechat:userId 格式
- * 
+ *
  * 注意：如果找不到用户，会返回原始值（可能是新用户或外部指定的 userId）。
  * 调用方应该处理无效 userId 的情况。
  */
@@ -289,10 +305,7 @@ export function resolveUserId(target: string): string | null {
 /**
  * 列出所有已知用户
  */
-export function listUsers(params?: {
-  query?: string;
-  limit?: number;
-}): WechatUserEntry[] {
+export function listUsers(params?: { query?: string; limit?: number }): WechatUserEntry[] {
   const directory = loadUserDirectory();
   // 返回拷贝以避免外部修改缓存
   let users = Object.values(directory.users).map((u) => ({ ...u }));
@@ -321,7 +334,7 @@ export function listUsers(params?: {
 
 /**
  * 设置用户别名
- * 
+ *
  * @returns 更新后的用户条目；如果用户不存在则返回 undefined
  */
 export function setUserAlias(userId: string, alias: string): WechatUserEntry | undefined {
@@ -396,7 +409,7 @@ export function syncUsersMd(workspacePath?: string): void {
   // 设置新的定时器，debounce 5 秒
   syncUsersMdTimer = setTimeout(() => {
     syncUsersMdTimer = null;
-    const base = workspacePath ?? process.env.MOLTBOT_WORKSPACE ?? process.cwd();
+    const base = workspacePath ?? resolveStateDir();
     const mdPath = join(base, "users.md");
     const content = generateUsersMd();
     try {
@@ -417,7 +430,7 @@ export function syncUsersMdImmediately(workspacePath?: string): void {
     syncUsersMdTimer = null;
   }
 
-  const base = workspacePath ?? process.env.MOLTBOT_WORKSPACE ?? process.cwd();
+  const base = workspacePath ?? resolveStateDir();
   const mdPath = join(base, "users.md");
   const content = generateUsersMd();
   try {
