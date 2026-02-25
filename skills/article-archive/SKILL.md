@@ -16,7 +16,7 @@ description: "处理长图：OCR → 判断是否为文章 → 归档或返回�
 ### 1. OCR 提取全文
 
 ```bash
-bash ~/clawdbot-fork/skills/ocr/scripts/ocr.sh <图片路径>
+bash {baseDir}/../ocr/scripts/ocr.sh <图片路径>
 ```
 
 ### 2. 判断是否为公众号文章

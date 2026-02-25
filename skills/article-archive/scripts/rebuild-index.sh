@@ -6,6 +6,15 @@
 set -euo pipefail
 
 ARTICLES_DIR="${1:-$HOME/clawd/data/articles}"
+# 去掉尾部斜杠，防止 relpath 计算出错
+ARTICLES_DIR="${ARTICLES_DIR%/}"
+
+# 确保目录存在（容错脚本不应因目录缺失而退出）
+if [[ ! -d "$ARTICLES_DIR" ]]; then
+    echo "📁 目标目录不存在，正在创建: $ARTICLES_DIR"
+    mkdir -p "$ARTICLES_DIR"
+fi
+
 INDEX_FILE="$ARTICLES_DIR/index.md"
 COUNT=0
 ROWS=""
@@ -43,7 +52,7 @@ while IFS= read -r -d '' file; do
             if [[ "$line" == "---" || "$line" == "## 正文" ]]; then
                 in_summary=false
             elif [[ -n "$line" ]]; then
-                # 截取前 20 字作为索引摘要
+                # 截取摘要首行前 60 字节作为索引摘要（中文约 20 字）
                 if [[ -z "$summary" ]]; then
                     summary="${line:0:60}"
                 fi
