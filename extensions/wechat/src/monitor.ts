@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { ResolvedWechatWorkAccount, WechatWorkConfig } from "./channel.js";
@@ -332,6 +333,66 @@ export async function handleWechatWebhookRequest(
   return true;
 }
 
+const WECHAT_IMAGE_DIR = "/tmp/wechat-images";
+const IMAGE_MAX_DIMENSION = 8000;
+const IMAGE_CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * 从 JPEG SOF / PNG IHDR 文件头读取图片宽高，纯 Buffer 操作，零依赖。
+ */
+function readImageDimensions(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24) return null;
+
+  // PNG: magic bytes 89 50 4E 47, IHDR 宽高在字节 16-23
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    const width = buf.readUInt32BE(16);
+    const height = buf.readUInt32BE(20);
+    return { width, height };
+  }
+
+  // JPEG: magic bytes FF D8, 扫描 SOF0-SOF3 marker
+  if (buf[0] === 0xff && buf[1] === 0xd8) {
+    let offset = 2;
+    while (offset < buf.length - 8) {
+      if (buf[offset] !== 0xff) {
+        offset++;
+        continue;
+      }
+      const marker = buf[offset + 1];
+      if (marker >= 0xc0 && marker <= 0xc3) {
+        const height = buf.readUInt16BE(offset + 5);
+        const width = buf.readUInt16BE(offset + 7);
+        return { width, height };
+      }
+      const segLen = buf.readUInt16BE(offset + 2);
+      offset += 2 + segLen;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 清理超过 24 小时的旧图片文件
+ */
+async function cleanupOldImages(dir: string): Promise<void> {
+  try {
+    const cutoff = Date.now() - IMAGE_CLEANUP_AGE_MS;
+    const files = await readdir(dir);
+    for (const f of files) {
+      const fpath = `${dir}/${f}`;
+      try {
+        const s = await stat(fpath);
+        if (s.mtimeMs < cutoff) await unlink(fpath).catch(() => {});
+      } catch {
+        // ignore stat errors for individual files
+      }
+    }
+  } catch {
+    // dir may not exist yet, that's fine
+  }
+}
+
 async function processMessage(message: WechatInboundMessage, target: WebhookTarget): Promise<void> {
   const { account, config, runtime, core, statusSink } = target;
 
@@ -409,18 +470,46 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
     }
   } else if (message.msgType === "image") {
     if (message.imageBase64 && message.imageMimeType) {
-      images.push({
-        type: "image",
-        data: message.imageBase64,
-        mimeType: message.imageMimeType,
-      });
-      // 图片消息如果没有文字，使用占位符
-      if (!text) {
-        text = "[图片]";
+      // 1. 保存图片到磁盘（让 AI 的 OCR skill 可以访问）
+      const ext = message.imageMimeType === "image/png" ? "png" : "jpg";
+      const imgPath = `${WECHAT_IMAGE_DIR}/${message.msgId}.${ext}`;
+      const imgBuffer = Buffer.from(message.imageBase64, "base64");
+
+      try {
+        await mkdir(WECHAT_IMAGE_DIR, { recursive: true });
+        await writeFile(imgPath, imgBuffer);
+      } catch (err) {
+        runtime.error?.(`[wechat] failed to save image: ${err}`);
       }
+
+      // 顺便清理旧文件（不阻塞主流程）
+      cleanupOldImages(WECHAT_IMAGE_DIR).catch(() => {});
+
+      // 2. 读取尺寸
+      const dimensions = readImageDimensions(imgBuffer);
+      const fileSize = Math.round(imgBuffer.length / 1024);
+      const dimStr = dimensions ? `${dimensions.width}x${dimensions.height}` : "unknown";
+      const isOversized =
+        dimensions != null &&
+        (dimensions.width > IMAGE_MAX_DIMENSION || dimensions.height > IMAGE_MAX_DIMENSION);
+
       runtime.log?.(
-        `[wechat] image message: mimeType=${message.imageMimeType}, size=${Math.round((message.imageBase64.length * 0.75) / 1024)}KB`,
+        `[wechat] image saved: ${imgPath} (${dimStr}, ${fileSize}KB, oversized=${isOversized})`,
       );
+
+      // 3. 构建文本描述（包含路径，让 OCR skill 可以定位文件）
+      const desc = `[图片] 路径: ${imgPath} (${dimStr}, ${fileSize}KB, ${message.imageMimeType})`;
+      text = text ? `${text}\n${desc}` : desc;
+
+      // 4. 正常尺寸：内嵌 base64（视觉+OCR 双通道）
+      //    超限尺寸：只传文本描述（OCR 兜底）
+      if (!isOversized) {
+        images.push({
+          type: "image",
+          data: message.imageBase64,
+          mimeType: message.imageMimeType,
+        });
+      }
     } else {
       // 图片数据缺失时优雅降级，保留消息而不是丢弃
       const metaParts: string[] = [];
@@ -434,7 +523,6 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
       runtime.error?.(
         `[wechat] image message missing base64 data, continuing without image data${metaSuffix}`,
       );
-      // 没有图片数据时，使用占位符文本保留消息
       if (!text) {
         text = metaParts.length > 0 ? `[图片不可用] ${metaParts.join(" ")}` : "[图片不可用]";
       }
