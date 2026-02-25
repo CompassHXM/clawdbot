@@ -1,6 +1,6 @@
+import { Buffer } from "node:buffer";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { Buffer } from "node:buffer";
 import type { ResolvedWechatWorkAccount, WechatWorkConfig } from "./channel.js";
 import { getWechatRuntime } from "./runtime.js";
 import { loadSpeechCredentials, transcribeVoice } from "./speech.js";
@@ -583,8 +583,10 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
       cfg: config,
       dispatcherOptions: {
         deliver: async (payload) => {
+          // 支持 mediaUrl (单数) 和 mediaUrls (数组) 两种格式
+          const resolvedMediaUrl = payload.mediaUrl ?? payload.mediaUrls?.[0];
           runtime.log?.(
-            `[wechat] deliver called: text="${(payload.text ?? "").slice(0, 100)}..." mediaUrl=${payload.mediaUrl ?? "none"}`,
+            `[wechat] deliver called: text="${(payload.text ?? "").slice(0, 100)}..." mediaUrl=${resolvedMediaUrl ?? "none"}`,
           );
           if (!section?.corpId || !section?.agentId || !section?.secret) {
             runtime.error?.("[wechat] cannot send reply: missing corpId/agentId/secret");
@@ -592,14 +594,14 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
           }
 
           // 如果有 mediaUrl（TTS 音频），使用 sendMedia 发送语音
-          if (payload.mediaUrl) {
+          if (resolvedMediaUrl) {
             const { sendMedia } = await import("./channel.js");
             const result = await sendMedia({
               corpId: section.corpId,
               secret: section.secret,
               agentId: section.agentId,
               toUser: message.fromUser,
-              mediaUrl: payload.mediaUrl,
+              mediaUrl: resolvedMediaUrl,
               text: payload.text,
             });
             runtime.log?.(
@@ -620,14 +622,19 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
 
           for (const chunk of chunks) {
             const { sendWorkWechatMessage } = await import("./channel.js");
-            await sendWorkWechatMessage({
+            const result = await sendWorkWechatMessage({
               corpId: section.corpId,
               secret: section.secret,
               agentId: section.agentId,
               toUser: message.fromUser,
               content: chunk,
             });
-            statusSink?.({ lastOutboundAt: Date.now() });
+            runtime.log?.(
+              `[wechat] sendWorkWechatMessage result: ok=${result.ok} error=${result.error ?? "none"}`,
+            );
+            if (result.ok) {
+              statusSink?.({ lastOutboundAt: Date.now() });
+            }
           }
         },
         onReplyStart: async () => {
