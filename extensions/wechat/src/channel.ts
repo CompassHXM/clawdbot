@@ -419,16 +419,29 @@ export async function sendMedia(params: {
 }): Promise<{ ok: boolean; messageId?: string; error?: string }> {
   const { corpId, secret, agentId, toUser, mediaUrl, text, fallbackToText = false } = params;
 
-  // 本地文件路径（非 HTTP URL）
-  if (mediaUrl && !mediaUrl.startsWith("http")) {
+  // 本地文件路径（非 HTTP/HTTPS URL）
+  if (mediaUrl && !/^https?:\/\//i.test(mediaUrl)) {
     const mediaType = detectMediaType(mediaUrl);
 
-    // 文件大小检查
+    // 文件存在性检查（所有类型都需要）
+    let fileSize: number;
     try {
-      const stat = statSync(mediaUrl);
+      fileSize = statSync(mediaUrl).size;
+    } catch (err) {
+      const error = `File not accessible: ${err instanceof Error ? err.message : String(err)}`;
+      console.error(`[wechat] ${error}`);
+      if (fallbackToText) {
+        const content = text || "[文件不存在或无法访问]";
+        return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+      }
+      return { ok: false, error };
+    }
+
+    // 文件大小检查（语音跳过：原始文件大小不代表转换后 AMR 大小）
+    if (mediaType !== "voice") {
       const sizeLimit = MEDIA_SIZE_LIMITS[mediaType];
-      if (stat.size > sizeLimit) {
-        const sizeMB = (stat.size / 1024 / 1024).toFixed(1);
+      if (fileSize > sizeLimit) {
+        const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
         const limitMB = (sizeLimit / 1024 / 1024).toFixed(0);
         const error = `File too large: ${sizeMB}MB exceeds ${mediaType} limit of ${limitMB}MB`;
         console.error(`[wechat] ${error}`);
@@ -438,14 +451,6 @@ export async function sendMedia(params: {
         }
         return { ok: false, error };
       }
-    } catch (err) {
-      const error = `File not accessible: ${err instanceof Error ? err.message : String(err)}`;
-      console.error(`[wechat] ${error}`);
-      if (fallbackToText) {
-        const content = text || "[文件不存在或无法访问]";
-        return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
-      }
-      return { ok: false, error };
     }
 
     // === 语音消息 ===
@@ -461,6 +466,19 @@ export async function sendMedia(params: {
       }
 
       try {
+        // 检查转换后的 AMR 文件大小
+        const amrSize = statSync(convertResult.amrPath).size;
+        if (amrSize > MEDIA_SIZE_LIMITS.voice) {
+          const sizeMB = (amrSize / 1024 / 1024).toFixed(1);
+          const error = `Converted AMR too large: ${sizeMB}MB exceeds voice limit of 2MB`;
+          console.error(`[wechat] ${error}`);
+          if (fallbackToText) {
+            const content = text || `[语音文件过大: ${sizeMB}MB，上限 2MB]`;
+            return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+          }
+          return { ok: false, error };
+        }
+
         const uploadResult = await uploadMedia({
           corpId,
           secret,
@@ -531,7 +549,18 @@ export async function sendMedia(params: {
 
     // 图片/视频/文件消息不支持附带文本，如果有 text 则单独发一条
     if (text) {
-      await sendWorkWechatMessage({ corpId, secret, agentId, toUser, content: text });
+      const textResult = await sendWorkWechatMessage({
+        corpId,
+        secret,
+        agentId,
+        toUser,
+        content: text,
+      });
+      if (!textResult.ok) {
+        console.error(
+          `[wechat] text caption send failed after ${mediaType} message (messageId=${mediaResult.messageId ?? "unknown"}): ${textResult.error ?? "Unknown error"}`,
+        );
+      }
     }
 
     return mediaResult;
