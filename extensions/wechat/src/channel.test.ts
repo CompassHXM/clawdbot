@@ -25,9 +25,7 @@ describe("channel", () => {
 
       expect(token).toBe("test-token-123");
       expect(mockFetch).toHaveBeenCalledTimes(1);
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("corpid=test-corp-id"),
-      );
+      expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("corpid=test-corp-id"));
     });
 
     it("should throw on API error", async () => {
@@ -41,14 +39,68 @@ describe("channel", () => {
 
       const { getAccessToken } = await import("./channel.js");
 
-      await expect(getAccessToken("bad-corp", "bad-secret")).rejects.toThrow(
-        "invalid credential",
-      );
+      await expect(getAccessToken("bad-corp", "bad-secret")).rejects.toThrow("invalid credential");
     });
   });
 });
 
-describe("audio file detection", () => {
+describe("detectMediaType", () => {
+  it("should detect audio files as voice", async () => {
+    const { detectMediaType } = await import("./channel.js");
+
+    expect(detectMediaType("/tmp/voice.mp3")).toBe("voice");
+    expect(detectMediaType("/tmp/voice.opus")).toBe("voice");
+    expect(detectMediaType("/tmp/voice.ogg")).toBe("voice");
+    expect(detectMediaType("/tmp/voice.wav")).toBe("voice");
+    expect(detectMediaType("/tmp/voice.amr")).toBe("voice");
+    expect(detectMediaType("/tmp/voice.m4a")).toBe("voice");
+    expect(detectMediaType("/tmp/voice.aac")).toBe("voice");
+    expect(detectMediaType("/tmp/voice.flac")).toBe("voice");
+  });
+
+  it("should detect image files", async () => {
+    const { detectMediaType } = await import("./channel.js");
+
+    expect(detectMediaType("/tmp/photo.jpg")).toBe("image");
+    expect(detectMediaType("/tmp/photo.jpeg")).toBe("image");
+    expect(detectMediaType("/tmp/photo.png")).toBe("image");
+    expect(detectMediaType("/tmp/photo.gif")).toBe("image");
+    expect(detectMediaType("/tmp/photo.bmp")).toBe("image");
+    expect(detectMediaType("/tmp/photo.webp")).toBe("image");
+  });
+
+  it("should detect video files", async () => {
+    const { detectMediaType } = await import("./channel.js");
+
+    expect(detectMediaType("/tmp/clip.mp4")).toBe("video");
+    expect(detectMediaType("/tmp/clip.mov")).toBe("video");
+    expect(detectMediaType("/tmp/clip.avi")).toBe("video");
+    expect(detectMediaType("/tmp/clip.wmv")).toBe("video");
+    expect(detectMediaType("/tmp/clip.mkv")).toBe("video");
+  });
+
+  it("should default to file for unknown extensions", async () => {
+    const { detectMediaType } = await import("./channel.js");
+
+    expect(detectMediaType("/tmp/doc.txt")).toBe("file");
+    expect(detectMediaType("/tmp/report.pdf")).toBe("file");
+    expect(detectMediaType("/tmp/slides.pptx")).toBe("file");
+    expect(detectMediaType("/tmp/data.xlsx")).toBe("file");
+    expect(detectMediaType("/tmp/archive.zip")).toBe("file");
+    expect(detectMediaType("/tmp/noext")).toBe("file");
+  });
+
+  it("should be case-insensitive", async () => {
+    const { detectMediaType } = await import("./channel.js");
+
+    expect(detectMediaType("/tmp/photo.JPG")).toBe("image");
+    expect(detectMediaType("/tmp/photo.PNG")).toBe("image");
+    expect(detectMediaType("/tmp/video.MP4")).toBe("video");
+    expect(detectMediaType("/tmp/voice.WAV")).toBe("voice");
+  });
+});
+
+describe("audio file detection (legacy)", () => {
   it("should identify audio file extensions", () => {
     const audioExtensions = [".mp3", ".opus", ".ogg", ".wav", ".amr", ".m4a", ".aac"];
 
@@ -77,10 +129,14 @@ describe("AMR conversion", () => {
     // - Codec: libopencore_amrnb
     const expectedArgs = [
       "-y",
-      "-i", "input.opus",
-      "-ar", "8000",
-      "-ac", "1",
-      "-c:a", "libopencore_amrnb",
+      "-i",
+      "input.opus",
+      "-ar",
+      "8000",
+      "-ac",
+      "1",
+      "-c:a",
+      "libopencore_amrnb",
       "output.amr",
     ];
 
@@ -152,5 +208,129 @@ describe("sendMedia with fallback", () => {
     };
 
     expect(params.fallbackToText).toBe(true);
+  });
+});
+
+describe("sendWorkWechatMedia", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockFetch.mockReset();
+    vi.stubGlobal("fetch", mockFetch);
+  });
+
+  it("should send image message with correct API format", async () => {
+    // First call: getAccessToken
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "token-123", expires_in: 7200 }),
+    });
+    // Second call: message/send
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ errcode: 0, errmsg: "ok", msgid: "msg-001" }),
+    });
+
+    const { sendWorkWechatMedia } = await import("./channel.js");
+    const result = await sendWorkWechatMedia({
+      corpId: "corp",
+      secret: "secret",
+      agentId: "1000002",
+      toUser: "user1",
+      mediaId: "media-id-123",
+      msgType: "image",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.messageId).toBe("msg-001");
+
+    // Verify the API call body
+    const sendCall = mockFetch.mock.calls[1];
+    const body = JSON.parse(sendCall[1].body);
+    expect(body.msgtype).toBe("image");
+    expect(body.image).toEqual({ media_id: "media-id-123" });
+  });
+
+  it("should send file message with correct API format", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "token-123", expires_in: 7200 }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ errcode: 0, errmsg: "ok", msgid: "msg-002" }),
+    });
+
+    const { sendWorkWechatMedia } = await import("./channel.js");
+    const result = await sendWorkWechatMedia({
+      corpId: "corp",
+      secret: "secret",
+      agentId: "1000002",
+      toUser: "user1",
+      mediaId: "media-id-456",
+      msgType: "file",
+    });
+
+    expect(result.ok).toBe(true);
+    const sendCall = mockFetch.mock.calls[1];
+    const body = JSON.parse(sendCall[1].body);
+    expect(body.msgtype).toBe("file");
+    expect(body.file).toEqual({ media_id: "media-id-456" });
+  });
+
+  it("should send video message with title and description", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "token-123", expires_in: 7200 }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ errcode: 0, errmsg: "ok", msgid: "msg-003" }),
+    });
+
+    const { sendWorkWechatMedia } = await import("./channel.js");
+    const result = await sendWorkWechatMedia({
+      corpId: "corp",
+      secret: "secret",
+      agentId: "1000002",
+      toUser: "user1",
+      mediaId: "media-id-789",
+      msgType: "video",
+      title: "My Video",
+      description: "A test video",
+    });
+
+    expect(result.ok).toBe(true);
+    const sendCall = mockFetch.mock.calls[1];
+    const body = JSON.parse(sendCall[1].body);
+    expect(body.msgtype).toBe("video");
+    expect(body.video).toEqual({
+      media_id: "media-id-789",
+      title: "My Video",
+      description: "A test video",
+    });
+  });
+
+  it("should return error on API failure", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: "token-123", expires_in: 7200 }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ errcode: 40004, errmsg: "invalid media type" }),
+    });
+
+    const { sendWorkWechatMedia } = await import("./channel.js");
+    const result = await sendWorkWechatMedia({
+      corpId: "corp",
+      secret: "secret",
+      agentId: "1000002",
+      toUser: "user1",
+      mediaId: "bad-media",
+      msgType: "image",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("invalid media type");
   });
 });
