@@ -1,8 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, unlinkSync, mkdtempSync, rmdirSync } from "node:fs";
+import { readFileSync, unlinkSync, mkdtempSync, rmdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, extname } from "node:path";
-
 import {
   buildChannelConfigSchema,
   DEFAULT_ACCOUNT_ID,
@@ -11,13 +10,8 @@ import {
   type OpenClawConfig,
 } from "openclaw/plugin-sdk";
 import { z } from "zod";
-
 import { getWechatRuntime } from "./runtime.js";
-import {
-  listUsers,
-  resolveUserId,
-  type WechatUserEntry,
-} from "./user-directory.js";
+import { listUsers, resolveUserId, type WechatUserEntry } from "./user-directory.js";
 
 // 企业微信 API 基础 URL
 const WORK_WECHAT_API = "https://qyapi.weixin.qq.com/cgi-bin";
@@ -184,6 +178,61 @@ export async function sendWorkWechatVoice(params: {
 }
 
 /**
+ * 发送图片/视频/文件消息（通用媒体发送）
+ * 语音消息使用专门的 sendWorkWechatVoice
+ */
+export async function sendWorkWechatMedia(params: {
+  corpId: string;
+  secret: string;
+  agentId: string;
+  toUser: string;
+  mediaId: string;
+  msgType: "image" | "video" | "file";
+  title?: string; // video only
+  description?: string; // video only
+}): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+  const { corpId, secret, agentId, toUser, mediaId, msgType, title, description } = params;
+
+  try {
+    const token = await getAccessToken(corpId, secret);
+    const url = `${WORK_WECHAT_API}/message/send?access_token=${token}`;
+
+    const mediaBody: Record<string, unknown> = { media_id: mediaId };
+    if (msgType === "video") {
+      if (title) mediaBody.title = title;
+      if (description) mediaBody.description = description;
+    }
+
+    const body = {
+      touser: toUser,
+      msgtype: msgType,
+      agentid: Number.parseInt(agentId, 10),
+      [msgType]: mediaBody,
+    };
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const data = (await response.json()) as {
+      errcode?: number;
+      errmsg?: string;
+      msgid?: string;
+    };
+
+    if (data.errcode && data.errcode !== 0) {
+      return { ok: false, error: `${data.errmsg} (code: ${data.errcode})` };
+    }
+
+    return { ok: true, messageId: data.msgid };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+/**
  * 上传临时素材到企业微信
  * @param type - 媒体类型: image, voice, video, file
  * @param filePath - 本地文件路径
@@ -212,8 +261,8 @@ export async function uploadMedia(params: {
 
     const header = Buffer.from(
       `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="media"; filename="${finalFileName}"; filelength=${fileBuffer.length}\r\n` +
-      `Content-Type: ${contentType}\r\n\r\n`
+        `Content-Disposition: form-data; name="media"; filename="${finalFileName}"; filelength=${fileBuffer.length}\r\n` +
+        `Content-Type: ${contentType}\r\n\r\n`,
     );
     const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
     const body = Buffer.concat([header, fileBuffer, footer]);
@@ -249,12 +298,57 @@ export async function uploadMedia(params: {
   }
 }
 
+/** 媒体类型 */
+export type MediaType = "image" | "voice" | "video" | "file";
+
+/** 企业微信各媒体类型上传大小限制 */
+const MEDIA_SIZE_LIMITS: Record<MediaType, number> = {
+  image: 10 * 1024 * 1024, // 10MB
+  voice: 2 * 1024 * 1024, // 2MB
+  video: 10 * 1024 * 1024, // 10MB
+  file: 20 * 1024 * 1024, // 20MB
+};
+
+/** 各媒体类型的扩展名映射 */
+const MEDIA_TYPE_EXTENSIONS: Record<string, MediaType> = {
+  // voice
+  ".amr": "voice",
+  ".mp3": "voice",
+  ".wav": "voice",
+  ".opus": "voice",
+  ".ogg": "voice",
+  ".m4a": "voice",
+  ".aac": "voice",
+  ".flac": "voice",
+  // image
+  ".jpg": "image",
+  ".jpeg": "image",
+  ".png": "image",
+  ".gif": "image",
+  ".bmp": "image",
+  ".webp": "image",
+  // video
+  ".mp4": "video",
+  ".mov": "video",
+  ".avi": "video",
+  ".wmv": "video",
+  ".mkv": "video",
+};
+
 /**
- * 检测文件是否是音频格式
+ * 根据文件扩展名检测媒体类型
+ * 未匹配的扩展名默认为 "file"
+ */
+export function detectMediaType(filePath: string): MediaType {
+  const ext = extname(filePath).toLowerCase();
+  return MEDIA_TYPE_EXTENSIONS[ext] ?? "file";
+}
+
+/**
+ * 检测文件是否是音频格式（保留向后兼容，内部使用 detectMediaType）
  */
 function isAudioFile(filePath: string): boolean {
-  const ext = extname(filePath).toLowerCase();
-  return [".mp3", ".opus", ".ogg", ".wav", ".amr", ".m4a", ".aac"].includes(ext);
+  return detectMediaType(filePath) === "voice";
 }
 
 /**
@@ -273,17 +367,14 @@ function convertToAmr(
     // -ar 8000: AMR 标准采样率
     // -ac 1: 单声道
     // -c:a libopencore_amrnb: 明确指定 AMR-NB 编码器
-    execFileSync("ffmpeg", [
-      "-y",
-      "-i", inputPath,
-      "-ar", "8000",
-      "-ac", "1",
-      "-c:a", "libopencore_amrnb",
-      amrPath,
-    ], {
-      timeout: 30000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    execFileSync(
+      "ffmpeg",
+      ["-y", "-i", inputPath, "-ar", "8000", "-ac", "1", "-c:a", "libopencore_amrnb", amrPath],
+      {
+        timeout: 30000,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
 
     const cleanup = () => {
       try {
@@ -313,7 +404,8 @@ function convertToAmr(
 
 /**
  * 发送媒体消息
- * 检测音频文件自动转为语音消息，支持 fallback 到文本
+ * 自动检测媒体类型（音频/图片/视频/文件），走对应的上传+发送流程
+ * 支持 fallback 到文本
  */
 export async function sendMedia(params: {
   corpId: string;
@@ -322,60 +414,159 @@ export async function sendMedia(params: {
   toUser: string;
   mediaUrl: string;
   text?: string;
-  /** 如果语音发送失败，是否 fallback 到文本消息 */
+  /** 如果媒体发送失败，是否 fallback 到文本消息 */
   fallbackToText?: boolean;
 }): Promise<{ ok: boolean; messageId?: string; error?: string }> {
   const { corpId, secret, agentId, toUser, mediaUrl, text, fallbackToText = false } = params;
 
-  // 检查是否是本地音频文件 (TTS 输出)
-  if (mediaUrl && !mediaUrl.startsWith("http") && isAudioFile(mediaUrl)) {
-    // 转换为 AMR 格式
-    const convertResult = convertToAmr(mediaUrl);
-    if (!convertResult.ok) {
-      console.error(`[wechat] voice conversion failed: ${convertResult.error}`);
+  // 本地文件路径（非 HTTP/HTTPS URL）
+  if (mediaUrl && !/^https?:\/\//i.test(mediaUrl)) {
+    const mediaType = detectMediaType(mediaUrl);
+
+    // 文件存在性检查（所有类型都需要）
+    let fileSize: number;
+    try {
+      fileSize = statSync(mediaUrl).size;
+    } catch (err) {
+      const error = `File not accessible: ${err instanceof Error ? err.message : String(err)}`;
+      console.error(`[wechat] ${error}`);
       if (fallbackToText) {
-        const content = text || "[语音转换失败]";
+        const content = text || "[文件不存在或无法访问]";
         return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
       }
-      return { ok: false, error: convertResult.error };
+      return { ok: false, error };
     }
 
-    try {
-      // 上传 AMR 到企业微信
-      const uploadResult = await uploadMedia({
-        corpId,
-        secret,
-        type: "voice",
-        filePath: convertResult.amrPath,
-        fileName: "voice.amr",
-      });
-
-      if (!uploadResult.ok || !uploadResult.mediaId) {
-        console.error(`[wechat] voice upload failed: ${uploadResult.error}`);
+    // 文件大小检查（语音跳过：原始文件大小不代表转换后 AMR 大小）
+    if (mediaType !== "voice") {
+      const sizeLimit = MEDIA_SIZE_LIMITS[mediaType];
+      if (fileSize > sizeLimit) {
+        const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
+        const limitMB = (sizeLimit / 1024 / 1024).toFixed(0);
+        const error = `File too large: ${sizeMB}MB exceeds ${mediaType} limit of ${limitMB}MB`;
+        console.error(`[wechat] ${error}`);
         if (fallbackToText) {
-          const content = text || "[语音上传失败]";
+          const content = text || `[文件过大: ${sizeMB}MB，上限 ${limitMB}MB]`;
           return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
         }
-        return { ok: false, error: uploadResult.error ?? "Upload failed" };
+        return { ok: false, error };
+      }
+    }
+
+    // === 语音消息 ===
+    if (mediaType === "voice") {
+      const convertResult = convertToAmr(mediaUrl);
+      if (!convertResult.ok) {
+        console.error(`[wechat] voice conversion failed: ${convertResult.error}`);
+        if (fallbackToText) {
+          const content = text || "[语音转换失败]";
+          return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+        }
+        return { ok: false, error: convertResult.error };
       }
 
-      // 发送语音消息
-      const result = await sendWorkWechatVoice({
+      try {
+        // 检查转换后的 AMR 文件大小
+        const amrSize = statSync(convertResult.amrPath).size;
+        if (amrSize > MEDIA_SIZE_LIMITS.voice) {
+          const sizeMB = (amrSize / 1024 / 1024).toFixed(1);
+          const error = `Converted AMR too large: ${sizeMB}MB exceeds voice limit of 2MB`;
+          console.error(`[wechat] ${error}`);
+          if (fallbackToText) {
+            const content = text || `[语音文件过大: ${sizeMB}MB，上限 2MB]`;
+            return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+          }
+          return { ok: false, error };
+        }
+
+        const uploadResult = await uploadMedia({
+          corpId,
+          secret,
+          type: "voice",
+          filePath: convertResult.amrPath,
+          fileName: "voice.amr",
+        });
+
+        if (!uploadResult.ok || !uploadResult.mediaId) {
+          console.error(`[wechat] voice upload failed: ${uploadResult.error}`);
+          if (fallbackToText) {
+            const content = text || "[语音上传失败]";
+            return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+          }
+          return { ok: false, error: uploadResult.error ?? "Upload failed" };
+        }
+
+        const result = await sendWorkWechatVoice({
+          corpId,
+          secret,
+          agentId,
+          toUser,
+          mediaId: uploadResult.mediaId,
+        });
+
+        return result;
+      } finally {
+        convertResult.cleanup();
+      }
+    }
+
+    // === 图片/视频/文件消息 ===
+    const uploadResult = await uploadMedia({
+      corpId,
+      secret,
+      type: mediaType,
+      filePath: mediaUrl,
+    });
+
+    if (!uploadResult.ok || !uploadResult.mediaId) {
+      const error = uploadResult.error ?? "Upload failed";
+      console.error(`[wechat] ${mediaType} upload failed: ${error}`);
+      if (fallbackToText) {
+        const content = text || `[${mediaType}上传失败]`;
+        return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+      }
+      return { ok: false, error };
+    }
+
+    // 发送媒体消息
+    const mediaResult = await sendWorkWechatMedia({
+      corpId,
+      secret,
+      agentId,
+      toUser,
+      mediaId: uploadResult.mediaId,
+      msgType: mediaType,
+    });
+
+    if (!mediaResult.ok) {
+      console.error(`[wechat] ${mediaType} send failed: ${mediaResult.error}`);
+      if (fallbackToText) {
+        const content = text || `[${mediaType}发送失败]`;
+        return sendWorkWechatMessage({ corpId, secret, agentId, toUser, content });
+      }
+      return mediaResult;
+    }
+
+    // 图片/视频/文件消息不支持附带文本，如果有 text 则单独发一条
+    if (text) {
+      const textResult = await sendWorkWechatMessage({
         corpId,
         secret,
         agentId,
         toUser,
-        mediaId: uploadResult.mediaId,
+        content: text,
       });
-
-      return result;
-    } finally {
-      // 清理临时文件
-      convertResult.cleanup();
+      if (!textResult.ok) {
+        console.error(
+          `[wechat] text caption send failed after ${mediaType} message (messageId=${mediaResult.messageId ?? "unknown"}): ${textResult.error ?? "Unknown error"}`,
+        );
+      }
     }
+
+    return mediaResult;
   }
 
-  // 非音频文件，发送文本 + 链接
+  // 非本地文件（HTTP URL 或其他），发送文本 + 链接
   const content = text ? `${text}\n${mediaUrl}` : mediaUrl;
   return sendWorkWechatMessage({
     corpId,
