@@ -24,6 +24,7 @@ import type {
   GatewayServiceEnvArgs,
   GatewayServiceInstallArgs,
   GatewayServiceManageArgs,
+  GatewayServiceRestartResult,
 } from "./service-types.js";
 import {
   installSystemdService,
@@ -41,6 +42,7 @@ export type {
   GatewayServiceEnvArgs,
   GatewayServiceInstallArgs,
   GatewayServiceManageArgs,
+  GatewayServiceRestartResult,
 } from "./service-types.js";
 
 function ignoreInstallResult(
@@ -58,13 +60,40 @@ export type GatewayService = {
   install: (args: GatewayServiceInstallArgs) => Promise<void>;
   uninstall: (args: GatewayServiceManageArgs) => Promise<void>;
   stop: (args: GatewayServiceControlArgs) => Promise<void>;
-  restart: (args: GatewayServiceControlArgs) => Promise<void>;
+  restart: (args: GatewayServiceControlArgs) => Promise<GatewayServiceRestartResult>;
   isLoaded: (args: GatewayServiceEnvArgs) => Promise<boolean>;
   readCommand: (env: GatewayServiceEnv) => Promise<GatewayServiceCommandConfig | null>;
   readRuntime: (env: GatewayServiceEnv) => Promise<GatewayServiceRuntime>;
 };
 
-const GATEWAY_SERVICE_REGISTRY = {
+export function describeGatewayServiceRestart(
+  serviceNoun: string,
+  result: GatewayServiceRestartResult,
+): {
+  scheduled: boolean;
+  daemonActionResult: "restarted" | "scheduled";
+  message: string;
+  progressMessage: string;
+} {
+  if (result.outcome === "scheduled") {
+    return {
+      scheduled: true,
+      daemonActionResult: "scheduled",
+      message: `restart scheduled, ${serviceNoun.toLowerCase()} will restart momentarily`,
+      progressMessage: `${serviceNoun} service restart scheduled.`,
+    };
+  }
+  return {
+    scheduled: false,
+    daemonActionResult: "restarted",
+    message: `${serviceNoun} service restarted.`,
+    progressMessage: `${serviceNoun} service restarted.`,
+  };
+}
+
+type SupportedGatewayServicePlatform = "darwin" | "linux" | "win32";
+
+const GATEWAY_SERVICE_REGISTRY: Record<SupportedGatewayServicePlatform, GatewayService> = {
   darwin: {
     label: "LaunchAgent",
     loadedText: "loaded",
@@ -101,12 +130,17 @@ const GATEWAY_SERVICE_REGISTRY = {
     readCommand: readScheduledTaskCommand,
     readRuntime: readScheduledTaskRuntime,
   },
-} satisfies Partial<Record<NodeJS.Platform, GatewayService>>;
+};
+
+function isSupportedGatewayServicePlatform(
+  platform: NodeJS.Platform,
+): platform is SupportedGatewayServicePlatform {
+  return Object.hasOwn(GATEWAY_SERVICE_REGISTRY, platform);
+}
 
 export function resolveGatewayService(): GatewayService {
-  const service = GATEWAY_SERVICE_REGISTRY[process.platform];
-  if (service) {
-    return service;
+  if (isSupportedGatewayServicePlatform(process.platform)) {
+    return GATEWAY_SERVICE_REGISTRY[process.platform];
   }
   throw new Error(`Gateway service install not supported on ${process.platform}`);
 }
