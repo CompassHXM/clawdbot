@@ -221,7 +221,8 @@ type WechatInboundMessage = {
   // 语音相关字段
   voiceBase64?: string;
   voiceFormat?: string;
-  // 文件相关字段
+  // 文件相关字段 — 注意: 企业微信自建应用回调不支持 file 类型
+  // 保留字段定义以备将来 API 扩展，当前不会收到 file 消息
   fileBase64?: string;
   fileMimeType?: string;
   fileName?: string;
@@ -348,7 +349,6 @@ export async function handleWechatWebhookRequest(
 }
 
 const WECHAT_IMAGE_DIR = "/tmp/wechat-images";
-const WECHAT_FILE_DIR = "/tmp/wechat-files";
 const WECHAT_VIDEO_DIR = "/tmp/wechat-videos";
 const IMAGE_MAX_DIMENSION = 8000;
 const MEDIA_CLEANUP_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -413,7 +413,9 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
   const { account, config, runtime, core, statusSink } = target;
 
   // 支持的消息类型
-  const supportedTypes = ["text", "image", "voice", "video", "file"];
+  // 注意: 企业微信自建应用回调不支持 file 类型
+  // 参考: https://developer.work.weixin.qq.com/document/path/90239
+  const supportedTypes = ["text", "image", "voice", "video"];
   if (!supportedTypes.includes(message.msgType)) {
     runtime.log?.(`[wechat] skipping unsupported message type=${message.msgType}`);
     return;
@@ -543,58 +545,35 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
         text = metaParts.length > 0 ? `[图片不可用] ${metaParts.join(" ")}` : "[图片不可用]";
       }
     }
-  } else if (message.msgType === "file") {
-    if (message.fileBase64) {
-      // 保存文件到磁盘
-      const safeFileName = (message.fileName || "unknown").replace(/[/\\:*?"<>|]/g, "_");
-      const filePath = `${WECHAT_FILE_DIR}/${message.msgId}_${safeFileName}`;
-      const fileBuffer = Buffer.from(message.fileBase64, "base64");
-
-      try {
-        await mkdir(WECHAT_FILE_DIR, { recursive: true });
-        await writeFile(filePath, fileBuffer);
-      } catch (err) {
-        runtime.error?.(`[wechat] failed to save file: ${err}`);
-      }
-
-      // 清理旧文件（不阻塞主流程）
-      cleanupOldMedia(WECHAT_FILE_DIR).catch(() => {});
-
-      const fileSize = Math.round(fileBuffer.length / 1024);
-      const mimeType = message.fileMimeType || "application/octet-stream";
-      runtime.log?.(`[wechat] file saved: ${filePath} (${fileSize}KB, ${mimeType})`);
-
-      // 构建文本描述（Agent 通过 read/exec 工具访问文件）
-      text = `[文件] ${safeFileName} 路径: ${filePath} (${fileSize}KB, ${mimeType})`;
-    } else {
-      // 文件数据缺失
-      const metaParts: string[] = [];
-      if (message.mediaId) metaParts.push(`mediaId=${message.mediaId}`);
-      if (message.fileName) metaParts.push(`name=${message.fileName}`);
-      runtime.error?.(`[wechat] file message missing base64 data`);
-      text = metaParts.length > 0 ? `[文件不可用] ${metaParts.join(" ")}` : "[文件不可用]";
-    }
   } else if (message.msgType === "video") {
+    // 注意: 企业微信自建应用回调不支持 file 类型，只支持 video
+    // 参考: https://developer.work.weixin.qq.com/document/path/90239
     if (message.videoBase64) {
       // 保存视频到磁盘
       const videoPath = `${WECHAT_VIDEO_DIR}/${message.msgId}.mp4`;
       const videoBuffer = Buffer.from(message.videoBase64, "base64");
+      let saved = false;
 
       try {
         await mkdir(WECHAT_VIDEO_DIR, { recursive: true });
         await writeFile(videoPath, videoBuffer);
+        saved = true;
       } catch (err) {
         runtime.error?.(`[wechat] failed to save video: ${err}`);
       }
 
-      // 清理旧文件（不阻塞主流程）
-      cleanupOldMedia(WECHAT_VIDEO_DIR).catch(() => {});
+      if (saved) {
+        // 清理旧文件（不阻塞主流程）
+        cleanupOldMedia(WECHAT_VIDEO_DIR).catch(() => {});
 
-      const videoSize = Math.round(videoBuffer.length / 1024);
-      runtime.log?.(`[wechat] video saved: ${videoPath} (${videoSize}KB)`);
+        const videoSize = Math.round(videoBuffer.length / 1024);
+        runtime.log?.(`[wechat] video saved: ${videoPath} (${videoSize}KB)`);
 
-      // 构建文本描述（Agent 通过 video-frames skill 提取帧分析）
-      text = `[视频] 路径: ${videoPath} (${videoSize}KB)`;
+        // 构建文本描述（Agent 通过 video-frames skill 提取帧分析）
+        text = `[视频] 路径: ${videoPath} (${videoSize}KB)`;
+      } else {
+        text = "[视频不可用] 保存失败";
+      }
     } else {
       // 视频数据缺失
       const metaParts: string[] = [];

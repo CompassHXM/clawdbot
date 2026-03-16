@@ -134,12 +134,11 @@ function parseXml(xml) {
     MediaId: extract("MediaId"),
     // 语音消息字段
     Format: extract("Format"),
-    // 文件消息字段
-    Title: extract("Title"),
-    Description: extract("Description"),
-    FileName: extract("FileName"),
     // 视频消息字段
     ThumbMediaId: extract("ThumbMediaId"),
+    // 注意: 企业微信自建应用回调不支持 file 类型消息
+    // 支持的消息类型: text, image, voice, video, location, link
+    // 参考: https://developer.work.weixin.qq.com/document/path/90239
   };
 }
 
@@ -263,7 +262,11 @@ async function downloadMedia(mediaId, accessToken, context) {
   context.log(`Downloading media: ${mediaId}`);
 
   try {
-    const response = await fetch(url);
+    // 20s timeout 防止大文件下载卡住 Azure Function
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
 
     // 检查 HTTP 状态
     if (!response.ok) {
@@ -331,9 +334,6 @@ async function forwardToClawdbot(message, config, context) {
   let imageMimeType = null;
   let voiceBase64 = null;
   let voiceFormat = null;
-  let fileBase64 = null;
-  let fileMimeType = null;
-  let fileName = null;
   let videoBase64 = null;
   let videoMimeType = null;
 
@@ -372,27 +372,9 @@ async function forwardToClawdbot(message, config, context) {
     }
   }
 
-  // 如果是文件消息，下载文件
-  if (message.MsgType === "file" && message.MediaId) {
-    try {
-      const accessToken = await getAccessToken(config.corpId, config.secret, context);
-      const media = await downloadMedia(message.MediaId, accessToken, context);
-      if (media) {
-        fileBase64 = media.base64;
-        fileMimeType = media.mimeType;
-        fileName = message.Title || null; // 企业微信 file 消息的文件名在 Title 字段
-        context.log(
-          `File downloaded: name=${fileName}, mimeType=${fileMimeType}, size=${Math.round((media.base64.length * 0.75) / 1024)}KB`,
-        );
-      } else {
-        context.warn("Failed to download file, continuing without file data");
-      }
-    } catch (err) {
-      context.error(`File download error: ${err}`);
-    }
-  }
-
   // 如果是视频消息，下载视频
+  // 注意: 企业微信自建应用不支持 file 类型回调，只支持 video
+  // 参考: https://developer.work.weixin.qq.com/document/path/90239
   if (message.MsgType === "video" && message.MediaId) {
     try {
       const accessToken = await getAccessToken(config.corpId, config.secret, context);
@@ -431,10 +413,6 @@ async function forwardToClawdbot(message, config, context) {
     // 语音数据 (仅当成功下载时)
     voiceBase64: voiceBase64,
     voiceFormat: voiceFormat,
-    // 文件数据 (仅当成功下载时)
-    fileBase64: fileBase64,
-    fileMimeType: fileMimeType,
-    fileName: fileName,
     // 视频数据 (仅当成功下载时)
     videoBase64: videoBase64,
     videoMimeType: videoMimeType,
