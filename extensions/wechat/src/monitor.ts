@@ -221,6 +221,14 @@ type WechatInboundMessage = {
   // 语音相关字段
   voiceBase64?: string;
   voiceFormat?: string;
+  // 文件相关字段 — 注意: 企业微信自建应用回调不支持 file 类型
+  // 保留字段定义以备将来 API 扩展，当前不会收到 file 消息
+  fileBase64?: string;
+  fileMimeType?: string;
+  fileName?: string;
+  // 视频相关字段
+  videoBase64?: string;
+  videoMimeType?: string;
 };
 
 function normalizeWechatMessage(payload: Record<string, unknown>): WechatInboundMessage | null {
@@ -250,6 +258,13 @@ function normalizeWechatMessage(payload: Record<string, unknown>): WechatInbound
     // 语音相关字段
     voiceBase64: readString(payload, "voiceBase64"),
     voiceFormat: readString(payload, "voiceFormat"),
+    // 文件相关字段
+    fileBase64: readString(payload, "fileBase64"),
+    fileMimeType: readString(payload, "fileMimeType"),
+    fileName: readString(payload, "fileName"),
+    // 视频相关字段
+    videoBase64: readString(payload, "videoBase64"),
+    videoMimeType: readString(payload, "videoMimeType"),
   };
 }
 
@@ -269,7 +284,7 @@ export async function handleWechatWebhookRequest(
     return true;
   }
 
-  const body = await readJsonBody(req, 10 * 1024 * 1024); // 10MB to accommodate base64 images
+  const body = await readJsonBody(req, 30 * 1024 * 1024); // 30MB to accommodate base64 files (20MB file → ~26.7MB base64)
   if (!body.ok) {
     res.statusCode = body.error === "payload too large" ? 413 : 400;
     res.end(body.error ?? "invalid payload");
@@ -334,8 +349,9 @@ export async function handleWechatWebhookRequest(
 }
 
 const WECHAT_IMAGE_DIR = "/tmp/wechat-images";
+const WECHAT_VIDEO_DIR = "/tmp/wechat-videos";
 const IMAGE_MAX_DIMENSION = 8000;
-const IMAGE_CLEANUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MEDIA_CLEANUP_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /**
  * 从 JPEG SOF / PNG IHDR 文件头读取图片宽高，纯 Buffer 操作，零依赖。
@@ -373,11 +389,11 @@ function readImageDimensions(buf: Buffer): { width: number; height: number } | n
 }
 
 /**
- * 清理超过 24 小时的旧图片文件
+ * 清理超过指定天数的旧媒体文件
  */
-async function cleanupOldImages(dir: string): Promise<void> {
+async function cleanupOldMedia(dir: string): Promise<void> {
   try {
-    const cutoff = Date.now() - IMAGE_CLEANUP_AGE_MS;
+    const cutoff = Date.now() - MEDIA_CLEANUP_AGE_MS;
     const files = await readdir(dir);
     for (const f of files) {
       const fpath = `${dir}/${f}`;
@@ -397,7 +413,9 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
   const { account, config, runtime, core, statusSink } = target;
 
   // 支持的消息类型
-  const supportedTypes = ["text", "image", "voice"];
+  // 注意: 企业微信自建应用回调不支持 file 类型
+  // 参考: https://developer.work.weixin.qq.com/document/path/90239
+  const supportedTypes = ["text", "image", "voice", "video"];
   if (!supportedTypes.includes(message.msgType)) {
     runtime.log?.(`[wechat] skipping unsupported message type=${message.msgType}`);
     return;
@@ -483,7 +501,7 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
       }
 
       // 顺便清理旧文件（不阻塞主流程）
-      cleanupOldImages(WECHAT_IMAGE_DIR).catch(() => {});
+      cleanupOldMedia(WECHAT_IMAGE_DIR).catch(() => {});
 
       // 2. 读取尺寸
       const dimensions = readImageDimensions(imgBuffer);
@@ -526,6 +544,42 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
       if (!text) {
         text = metaParts.length > 0 ? `[图片不可用] ${metaParts.join(" ")}` : "[图片不可用]";
       }
+    }
+  } else if (message.msgType === "video") {
+    // 注意: 企业微信自建应用回调不支持 file 类型，只支持 video
+    // 参考: https://developer.work.weixin.qq.com/document/path/90239
+    if (message.videoBase64) {
+      // 保存视频到磁盘
+      const videoPath = `${WECHAT_VIDEO_DIR}/${message.msgId}.mp4`;
+      const videoBuffer = Buffer.from(message.videoBase64, "base64");
+      let saved = false;
+
+      try {
+        await mkdir(WECHAT_VIDEO_DIR, { recursive: true });
+        await writeFile(videoPath, videoBuffer);
+        saved = true;
+      } catch (err) {
+        runtime.error?.(`[wechat] failed to save video: ${err}`);
+      }
+
+      if (saved) {
+        // 清理旧文件（不阻塞主流程）
+        cleanupOldMedia(WECHAT_VIDEO_DIR).catch(() => {});
+
+        const videoSize = Math.round(videoBuffer.length / 1024);
+        runtime.log?.(`[wechat] video saved: ${videoPath} (${videoSize}KB)`);
+
+        // 构建文本描述（Agent 通过 video-frames skill 提取帧分析）
+        text = `[视频] 路径: ${videoPath} (${videoSize}KB)`;
+      } else {
+        text = "[视频不可用] 保存失败";
+      }
+    } else {
+      // 视频数据缺失
+      const metaParts: string[] = [];
+      if (message.mediaId) metaParts.push(`mediaId=${message.mediaId}`);
+      runtime.error?.(`[wechat] video message missing base64 data`);
+      text = metaParts.length > 0 ? `[视频不可用] ${metaParts.join(" ")}` : "[视频不可用]";
     }
   }
 
