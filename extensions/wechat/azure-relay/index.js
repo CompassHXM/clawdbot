@@ -1,11 +1,11 @@
 /**
  * WeChat Work Relay - Azure Function
- * 
+ *
  * 功能:
  * 1. /api/wechat - 接收企业微信的回调消息，解密后转发到 Clawdbot webhook
  * 2. /api/jssdk-config - 提供 JS-SDK 签名配置
  * 3. /api/home - 应用主页（快捷指令）
- * 
+ *
  * 环境变量:
  * - WECHAT_TOKEN: 企业微信后台配置的 Token
  * - WECHAT_ENCODING_AES_KEY: 企业微信后台配置的 EncodingAESKey (43位)
@@ -110,7 +110,9 @@ class WxBizMsgCrypt {
 
 function parseXml(xml) {
   const extract = (tag) => {
-    const match = new RegExp("<" + tag + "><!\\[CDATA\\[([\\s\\S]*?)\\]\\]></" + tag + ">").exec(xml);
+    const match = new RegExp("<" + tag + "><!\\[CDATA\\[([\\s\\S]*?)\\]\\]></" + tag + ">").exec(
+      xml,
+    );
     return match ? match[1] : undefined;
   };
   const extractNum = (tag) => {
@@ -132,6 +134,12 @@ function parseXml(xml) {
     MediaId: extract("MediaId"),
     // 语音消息字段
     Format: extract("Format"),
+    // 文件消息字段
+    Title: extract("Title"),
+    Description: extract("Description"),
+    FileName: extract("FileName"),
+    // 视频消息字段
+    ThumbMediaId: extract("ThumbMediaId"),
   };
 }
 
@@ -162,7 +170,7 @@ const WECHAT_API = "https://qyapi.weixin.qq.com/cgi-bin";
  */
 async function getAccessToken(corpId, secret, context) {
   const now = Date.now();
-  
+
   // 检查缓存 (提前 5 分钟过期)
   if (accessTokenCache.token && accessTokenCache.expiresAt > now + 300000) {
     context.log("Using cached access_token");
@@ -191,7 +199,7 @@ async function getAccessToken(corpId, secret, context) {
  */
 async function getJsapiTicket(accessToken, context) {
   const now = Date.now();
-  
+
   // 检查缓存 (提前 5 分钟过期)
   if (jsapiTicketCache.ticket && jsapiTicketCache.expiresAt > now + 300000) {
     context.log("Using cached jsapi_ticket");
@@ -239,8 +247,8 @@ function generateNonceStr(length = 16) {
 // 媒体下载
 // ============================================================================
 
-// 图片大小限制 (5MB)
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+// 媒体大小限制 (20MB — 企业微信 file 类型上限)
+const MAX_MEDIA_SIZE = 20 * 1024 * 1024;
 
 /**
  * 下载媒体文件
@@ -251,18 +259,18 @@ const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
  */
 async function downloadMedia(mediaId, accessToken, context) {
   const url = `${WECHAT_API}/media/get?access_token=${accessToken}&media_id=${mediaId}`;
-  
+
   context.log(`Downloading media: ${mediaId}`);
-  
+
   try {
     const response = await fetch(url);
-    
+
     // 检查 HTTP 状态
     if (!response.ok) {
       context.error(`media/get HTTP error: ${response.status} ${response.statusText}`);
       return null;
     }
-    
+
     // 检查是否返回错误 JSON
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
@@ -270,29 +278,29 @@ async function downloadMedia(mediaId, accessToken, context) {
       context.error(`media/get API error: ${error.errmsg} (${error.errcode})`);
       return null;
     }
-    
+
     // 检查文件大小
     const contentLength = response.headers.get("content-length");
-    if (contentLength && parseInt(contentLength) > MAX_IMAGE_SIZE) {
-      context.error(`Media too large: ${contentLength} bytes (max: ${MAX_IMAGE_SIZE})`);
+    if (contentLength && parseInt(contentLength) > MAX_MEDIA_SIZE) {
+      context.error(`Media too large: ${contentLength} bytes (max: ${MAX_MEDIA_SIZE})`);
       return null;
     }
-    
-    // 获取图片数据
+
+    // 获取数据
     const buffer = await response.arrayBuffer();
-    
+
     // 二次检查实际大小
-    if (buffer.byteLength > MAX_IMAGE_SIZE) {
+    if (buffer.byteLength > MAX_MEDIA_SIZE) {
       context.error(`Media too large after download: ${buffer.byteLength} bytes`);
       return null;
     }
-    
+
     const base64 = Buffer.from(buffer).toString("base64");
-    const mimeType = contentType.split(";")[0].trim() || "image/jpeg";
-    
+    const mimeType = contentType.split(";")[0].trim() || "application/octet-stream";
+
     const sizeKB = Math.round(buffer.byteLength / 1024);
     context.log(`Downloaded media: ${mimeType}, ${sizeKB}KB`);
-    
+
     return { base64, mimeType };
   } catch (err) {
     context.error(`Failed to download media: ${err}`);
@@ -306,13 +314,13 @@ async function downloadMedia(mediaId, accessToken, context) {
 
 // 重试配置
 const WEBHOOK_MAX_RETRIES = 3;
-const WEBHOOK_TIMEOUT_MS = 15000;
+const WEBHOOK_TIMEOUT_MS = 30000;
 
 /**
  * 延迟函数
  */
 function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -323,7 +331,12 @@ async function forwardToClawdbot(message, config, context) {
   let imageMimeType = null;
   let voiceBase64 = null;
   let voiceFormat = null;
-  
+  let fileBase64 = null;
+  let fileMimeType = null;
+  let fileName = null;
+  let videoBase64 = null;
+  let videoMimeType = null;
+
   // 如果是图片消息，下载图片
   if (message.MsgType === "image" && message.MediaId) {
     try {
@@ -337,10 +350,9 @@ async function forwardToClawdbot(message, config, context) {
       }
     } catch (err) {
       context.error(`Image download error: ${err}`);
-      // 继续处理，只是不带图片
     }
   }
-  
+
   // 如果是语音消息，下载语音
   if (message.MsgType === "voice" && message.MediaId) {
     try {
@@ -349,16 +361,56 @@ async function forwardToClawdbot(message, config, context) {
       if (media) {
         voiceBase64 = media.base64;
         voiceFormat = message.Format || "amr";
-        context.log(`Voice downloaded: format=${voiceFormat}, size=${Math.round(media.base64.length * 0.75 / 1024)}KB`);
+        context.log(
+          `Voice downloaded: format=${voiceFormat}, size=${Math.round((media.base64.length * 0.75) / 1024)}KB`,
+        );
       } else {
         context.warn("Failed to download voice, continuing without voice data");
       }
     } catch (err) {
       context.error(`Voice download error: ${err}`);
-      // 继续处理，只是不带语音
     }
   }
-  
+
+  // 如果是文件消息，下载文件
+  if (message.MsgType === "file" && message.MediaId) {
+    try {
+      const accessToken = await getAccessToken(config.corpId, config.secret, context);
+      const media = await downloadMedia(message.MediaId, accessToken, context);
+      if (media) {
+        fileBase64 = media.base64;
+        fileMimeType = media.mimeType;
+        fileName = message.Title || null; // 企业微信 file 消息的文件名在 Title 字段
+        context.log(
+          `File downloaded: name=${fileName}, mimeType=${fileMimeType}, size=${Math.round((media.base64.length * 0.75) / 1024)}KB`,
+        );
+      } else {
+        context.warn("Failed to download file, continuing without file data");
+      }
+    } catch (err) {
+      context.error(`File download error: ${err}`);
+    }
+  }
+
+  // 如果是视频消息，下载视频
+  if (message.MsgType === "video" && message.MediaId) {
+    try {
+      const accessToken = await getAccessToken(config.corpId, config.secret, context);
+      const media = await downloadMedia(message.MediaId, accessToken, context);
+      if (media) {
+        videoBase64 = media.base64;
+        videoMimeType = media.mimeType;
+        context.log(
+          `Video downloaded: mimeType=${videoMimeType}, size=${Math.round((media.base64.length * 0.75) / 1024)}KB`,
+        );
+      } else {
+        context.warn("Failed to download video, continuing without video data");
+      }
+    } catch (err) {
+      context.error(`Video download error: ${err}`);
+    }
+  }
+
   const payload = {
     type: "wechat-work-message",
     fromUser: message.FromUserName,
@@ -379,6 +431,13 @@ async function forwardToClawdbot(message, config, context) {
     // 语音数据 (仅当成功下载时)
     voiceBase64: voiceBase64,
     voiceFormat: voiceFormat,
+    // 文件数据 (仅当成功下载时)
+    fileBase64: fileBase64,
+    fileMimeType: fileMimeType,
+    fileName: fileName,
+    // 视频数据 (仅当成功下载时)
+    videoBase64: videoBase64,
+    videoMimeType: videoMimeType,
   };
 
   const headers = { "Content-Type": "application/json" };
@@ -388,11 +447,13 @@ async function forwardToClawdbot(message, config, context) {
 
   // 带重试的 webhook 调用
   for (let attempt = 1; attempt <= WEBHOOK_MAX_RETRIES; attempt++) {
-    context.log(`Forwarding to Clawdbot (attempt ${attempt}/${WEBHOOK_MAX_RETRIES}): ${config.webhookUrl}`);
-    
+    context.log(
+      `Forwarding to Clawdbot (attempt ${attempt}/${WEBHOOK_MAX_RETRIES}): ${config.webhookUrl}`,
+    );
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
-    
+
     try {
       const response = await fetch(config.webhookUrl, {
         method: "POST",
@@ -402,12 +463,12 @@ async function forwardToClawdbot(message, config, context) {
       });
 
       clearTimeout(timeoutId);
-      
+
       if (response.ok) {
         context.log(`Clawdbot webhook success: ${response.status}`);
         return true;
       }
-      
+
       context.warn(`Webhook attempt ${attempt} failed: ${response.status} ${response.statusText}`);
     } catch (err) {
       clearTimeout(timeoutId);
@@ -419,7 +480,7 @@ async function forwardToClawdbot(message, config, context) {
       }
       context.warn(`Webhook attempt ${attempt} error: ${errorMsg}`);
     }
-    
+
     // 等待后重试 (递增延迟: 1s, 2s, 3s)
     if (attempt < WEBHOOK_MAX_RETRIES) {
       const waitMs = attempt * 1000;
@@ -427,7 +488,7 @@ async function forwardToClawdbot(message, config, context) {
       await delay(waitMs);
     }
   }
-  
+
   context.error(`All ${WEBHOOK_MAX_RETRIES} webhook attempts failed`);
   return false;
 }
@@ -672,7 +733,7 @@ async function wechatCallback(request, context) {
   context.log("WeChat callback: " + request.method + " " + request.url);
 
   const config = getConfig();
-  
+
   if (!config.token || !config.encodingAESKey || !config.corpId) {
     context.error("Missing WeChat config");
     return { status: 500, body: "Configuration error" };
@@ -692,7 +753,7 @@ async function wechatCallback(request, context) {
   // GET: URL 验证
   if (request.method === "GET") {
     context.log("URL verification request");
-    
+
     if (!echostr) {
       return { status: 400, body: "Missing echostr" };
     }
@@ -754,11 +815,11 @@ async function jssdkConfig(request, context) {
   context.log("JSSDK config request");
 
   const config = getConfig();
-  
+
   if (!config.corpId || !config.secret) {
     return {
       status: 500,
-      jsonBody: { error: "Missing WECHAT_CORP_ID or WECHAT_SECRET" }
+      jsonBody: { error: "Missing WECHAT_CORP_ID or WECHAT_SECRET" },
     };
   }
 
@@ -766,17 +827,17 @@ async function jssdkConfig(request, context) {
   if (!url) {
     return {
       status: 400,
-      jsonBody: { error: "Missing url parameter" }
+      jsonBody: { error: "Missing url parameter" },
     };
   }
 
   try {
     // 获取 access_token
     const accessToken = await getAccessToken(config.corpId, config.secret, context);
-    
+
     // 获取 jsapi_ticket
     const ticket = await getJsapiTicket(accessToken, context);
-    
+
     // 生成签名
     const timestamp = Math.floor(Date.now() / 1000);
     const nonceStr = generateNonceStr();
@@ -792,13 +853,13 @@ async function jssdkConfig(request, context) {
         timestamp,
         nonceStr,
         signature,
-      }
+      },
     };
   } catch (err) {
     context.error("JSSDK config error: " + err);
     return {
       status: 500,
-      jsonBody: { error: err.message }
+      jsonBody: { error: err.message },
     };
   }
 }
@@ -814,9 +875,9 @@ async function homePage(request, context) {
   return {
     status: 200,
     headers: {
-      "Content-Type": "text/html; charset=utf-8"
+      "Content-Type": "text/html; charset=utf-8",
     },
-    body: getHomeHtml(config)
+    body: getHomeHtml(config),
   };
 }
 
