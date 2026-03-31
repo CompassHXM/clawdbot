@@ -1,21 +1,12 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { withTempDir } from "../../test-helpers/temp-dir.js";
 import {
   buildPinnedWritePlan,
   SANDBOX_PINNED_MUTATION_PYTHON,
 } from "./fs-bridge-mutation-helper.js";
-
-async function withTempRoot<T>(prefix: string, run: (root: string) => Promise<T>): Promise<T> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  try {
-    return await run(root);
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-  }
-}
 
 function runMutation(args: string[], input?: string) {
   return spawnSync("python3", ["-c", SANDBOX_PINNED_MUTATION_PYTHON, ...args], {
@@ -47,7 +38,7 @@ function runWritePlan(args: string[], input?: string) {
     mkdir: args[4] === "1",
   });
 
-  return spawnSync("sh", ["-c", plan.script, "moltbot-sandbox-fs", ...(plan.args ?? [])], {
+  return spawnSync("sh", ["-c", plan.script, "openclaw-sandbox-fs", ...(plan.args ?? [])], {
     input,
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
@@ -56,7 +47,7 @@ function runWritePlan(args: string[], input?: string) {
 
 describe("sandbox pinned mutation helper", () => {
   it("writes through a pinned directory fd", async () => {
-    await withTempRoot("openclaw-mutation-helper-", async (root) => {
+    await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
       const workspace = path.join(root, "workspace");
       await fs.mkdir(workspace, { recursive: true });
 
@@ -70,9 +61,45 @@ describe("sandbox pinned mutation helper", () => {
   });
 
   it.runIf(process.platform !== "win32")(
+    "reads through a pinned directory fd and rejects hardlinked files",
+    async () => {
+      await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
+        const workspace = path.join(root, "workspace");
+        const nested = path.join(workspace, "nested");
+        await fs.mkdir(nested, { recursive: true });
+        await fs.writeFile(path.join(workspace, "read.txt"), "hello", "utf8");
+
+        const readResult = runMutation(["read", workspace, "", "read.txt"]);
+        expect(readResult.status).toBe(0);
+        expect(readResult.stdout).toBe("hello");
+
+        const hardlinkedFile = path.join(nested, "hardlinked.txt");
+        await fs.link(path.join(workspace, "read.txt"), hardlinkedFile);
+
+        const hardlinkResult = runMutation(["read", workspace, "nested", "hardlinked.txt"]);
+        expect(hardlinkResult.status).not.toBe(0);
+        expect(hardlinkResult.stderr).toMatch(/hardlinked file/i);
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")("rejects non-regular files while reading", async () => {
+    await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
+      const workspace = path.join(root, "workspace");
+      await fs.mkdir(workspace, { recursive: true });
+      await fs.mkdir(path.join(workspace, "folder"), { recursive: true });
+
+      const result = runMutation(["read", workspace, "", "folder"]);
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/only regular files are allowed/i);
+    });
+  });
+
+  it.runIf(process.platform !== "win32")(
     "preserves stdin payload bytes when the pinned write plan runs through sh",
     async () => {
-      await withTempRoot("openclaw-mutation-helper-", async (root) => {
+      await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
         const workspace = path.join(root, "workspace");
         await fs.mkdir(workspace, { recursive: true });
 
@@ -92,7 +119,7 @@ describe("sandbox pinned mutation helper", () => {
   it.runIf(process.platform !== "win32")(
     "rejects symlink-parent writes instead of materializing a temp file outside the mount",
     async () => {
-      await withTempRoot("openclaw-mutation-helper-", async (root) => {
+      await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
         const workspace = path.join(root, "workspace");
         const outside = path.join(root, "outside");
         await fs.mkdir(workspace, { recursive: true });
@@ -108,7 +135,7 @@ describe("sandbox pinned mutation helper", () => {
   );
 
   it.runIf(process.platform !== "win32")("rejects symlink segments during mkdirp", async () => {
-    await withTempRoot("openclaw-mutation-helper-", async (root) => {
+    await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
       const workspace = path.join(root, "workspace");
       const outside = path.join(root, "outside");
       await fs.mkdir(workspace, { recursive: true });
@@ -123,7 +150,7 @@ describe("sandbox pinned mutation helper", () => {
   });
 
   it.runIf(process.platform !== "win32")("remove unlinks the symlink itself", async () => {
-    await withTempRoot("openclaw-mutation-helper-", async (root) => {
+    await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
       const workspace = path.join(root, "workspace");
       const outside = path.join(root, "outside");
       await fs.mkdir(workspace, { recursive: true });
@@ -144,7 +171,7 @@ describe("sandbox pinned mutation helper", () => {
   it.runIf(process.platform !== "win32")(
     "rejects symlink destination parents during rename",
     async () => {
-      await withTempRoot("openclaw-mutation-helper-", async (root) => {
+      await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
         const workspace = path.join(root, "workspace");
         const outside = path.join(root, "outside");
         await fs.mkdir(workspace, { recursive: true });
@@ -175,7 +202,7 @@ describe("sandbox pinned mutation helper", () => {
   it.runIf(process.platform !== "win32")(
     "copies directories across different mount roots during rename fallback",
     async () => {
-      await withTempRoot("openclaw-mutation-helper-", async (root) => {
+      await withTempDir({ prefix: "openclaw-mutation-helper-" }, async (root) => {
         const sourceRoot = path.join(root, "source");
         const destRoot = path.join(root, "dest");
         await fs.mkdir(path.join(sourceRoot, "dir", "nested"), { recursive: true });

@@ -29,7 +29,7 @@ Protocol details:
 - [Gateway protocol](/gateway/protocol)
 - [Bridge protocol (legacy)](/gateway/bridge-protocol)
 
-## Why we keep both “direct” and SSH
+## Why we keep both "direct" and SSH
 
 - **Direct WS** is the best UX on the same network and within a tailnet:
   - auto-discovery on LAN via Bonjour
@@ -59,6 +59,8 @@ Troubleshooting and beacon details: [Bonjour](/gateway/bonjour).
   - `_openclaw-gw._tcp` (gateway transport beacon)
 - TXT keys (non-secret):
   - `role=gateway`
+  - `transport=gateway`
+  - `displayName=<friendly name>` (operator-configured display name)
   - `lanHost=<hostname>.local`
   - `sshPort=22` (or whatever is advertised)
   - `gatewayPort=18789` (Gateway WS + HTTP)
