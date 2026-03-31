@@ -614,8 +614,8 @@ function looksLikeWechatTargetId(target: string): boolean {
   if (/^wechat:/i.test(trimmed)) return true;
 
   // 企业微信 UserID 通常是字母数字组合，可能包含下划线
-  // 支持中文用户名作为查找目标
-  return /^[\w\u4e00-\u9fa5-]+$/i.test(trimmed);
+  // 支持中文用户名和含空格的英文名（如 "Alice Zhu"）作为查找目标
+  return /^[\w\u4e00-\u9fa5\s-]+$/i.test(trimmed);
 }
 
 /**
@@ -639,12 +639,14 @@ function userEntryToDirectoryEntry(entry: WechatUserEntry): {
   kind: "user";
   id: string;
   name?: string;
+  handle?: string;
   raw?: Record<string, unknown>;
 } {
   return {
     kind: "user",
     id: entry.userId,
-    name: entry.alias ?? entry.name,
+    name: entry.name ?? entry.alias,
+    handle: entry.alias,
     raw: {
       userId: entry.userId,
       alias: entry.alias,
