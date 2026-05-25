@@ -1,12 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk/core";
 import { wechatPlugin } from "./src/channel.js";
 import { handleWechatWebhookRequest } from "./src/monitor.js";
 import { setWechatRuntime } from "./src/runtime.js";
 
 const plugin = {
-  id: "wechat",
+  id: "wecom-self",
   name: "WeChat",
   description: "WeChat Work (企业微信) channel plugin",
   configSchema: emptyPluginConfigSchema(),
