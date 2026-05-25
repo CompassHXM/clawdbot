@@ -8,7 +8,7 @@ import {
   normalizeAccountId,
   type ChannelPlugin,
   type OpenClawConfig,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/core";
 import { z } from "zod";
 import { getWechatRuntime } from "./runtime.js";
 import { listUsers, resolveUserId, type WechatUserEntry } from "./user-directory.js";
@@ -578,7 +578,7 @@ export async function sendMedia(params: {
 }
 
 function listWechatWorkAccountIds(cfg: OpenClawConfig): string[] {
-  const section = cfg.channels?.wechat;
+  const section = cfg.channels?.["wecom-self"];
   if (!section) return [];
   return [DEFAULT_ACCOUNT_ID];
 }
@@ -589,7 +589,7 @@ function resolveWechatWorkAccount(params: {
 }): ResolvedWechatWorkAccount {
   const { cfg, accountId } = params;
   const resolvedAccountId = normalizeAccountId(accountId);
-  const section = cfg.channels?.wechat as WechatWorkConfig | undefined;
+  const section = cfg.channels?.["wecom-self"] as WechatWorkConfig | undefined;
 
   return {
     accountId: resolvedAccountId,
@@ -604,14 +604,15 @@ function resolveWechatWorkAccount(params: {
 /**
  * 检查是否像 WeChat Work 目标 ID
  * - 纯字母数字（企业微信 UserID 通常是这种格式）
- * - wechat:userId 格式
+ * - wechat:userId 或 wecom-self:userId 格式
  */
 function looksLikeWechatTargetId(target: string): boolean {
   const trimmed = target.trim();
   if (!trimmed) return false;
 
-  // wechat:xxx 格式
+  // wechat:xxx 或 wecom-self:xxx 格式（保留 wechat 兼容旧输入）
   if (/^wechat:/i.test(trimmed)) return true;
+  if (/^wecom-self:/i.test(trimmed)) return true;
 
   // 企业微信 UserID 通常是字母数字组合，可能包含下划线
   // 支持中文用户名和含空格的英文名（如 "Alice Zhu"）作为查找目标
@@ -625,8 +626,8 @@ function normalizeWechatMessagingTarget(target: string): string | null {
   const trimmed = target.trim();
   if (!trimmed) return null;
 
-  // 移除 wechat: 前缀
-  const cleaned = trimmed.replace(/^wechat:/i, "").trim();
+  // 移除 wechat: 或 wecom-self: 前缀（保留 wechat 兼容旧输入）
+  const cleaned = trimmed.replace(/^(wechat|wecom-self):/i, "").trim();
   if (!cleaned) return null;
 
   return cleaned;
@@ -658,9 +659,9 @@ function userEntryToDirectoryEntry(entry: WechatUserEntry): {
 }
 
 export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
-  id: "wechat",
+  id: "wecom-self",
   meta: {
-    id: "wechat",
+    id: "wecom-self",
     label: "WeChat Work",
     selectionLabel: "WeChat Work (企业微信)",
     docsPath: "/channels/wechat",
@@ -674,7 +675,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
     nativeCommands: false,
     blockStreaming: true,
   },
-  reload: { configPrefixes: ["channels.wechat"] },
+  reload: { configPrefixes: ["channels.wecom-self"] },
   configSchema: buildChannelConfigSchema(WechatWorkConfigSchema),
   config: {
     listAccountIds: (cfg) => listWechatWorkAccountIds(cfg),
@@ -689,7 +690,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
       configured: Boolean(account.corpId && account.agentId && account.secret),
     }),
     resolveAllowFrom: ({ cfg }) => {
-      const section = cfg.channels?.wechat as WechatWorkConfig | undefined;
+      const section = cfg.channels?.["wecom-self"] as WechatWorkConfig | undefined;
       return section?.allowFrom ?? [];
     },
     formatAllowFrom: ({ allowFrom }) =>
@@ -705,8 +706,8 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
         ...cfg,
         channels: {
           ...cfg.channels,
-          wechat: {
-            ...cfg.channels?.wechat,
+          "wecom-self": {
+            ...cfg.channels?.["wecom-self"],
             enabled: true,
           },
         },
@@ -717,7 +718,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
     normalizeTarget: normalizeWechatMessagingTarget,
     targetResolver: {
       looksLikeId: looksLikeWechatTargetId,
-      hint: "<userId|userName|wechat:userId>",
+      hint: "<userId|userName|wecom-self:userId>",
     },
   },
   directory: {
@@ -728,7 +729,9 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
         query: params.query ?? undefined,
         limit: params.limit ?? undefined,
       });
-      return users.map(userEntryToDirectoryEntry);
+      const entries = users.map(userEntryToDirectoryEntry);
+      console.log(`[wechat] listPeers called: query=${JSON.stringify(params.query)}, found=${entries.length}`);
+      return entries;
     },
     listGroups: async () => {
       // WeChat Work 当前只支持私聊
@@ -796,14 +799,14 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
       };
     },
     sendText: async ({ to, text, cfg }) => {
-      const section = cfg?.channels?.wechat as WechatWorkConfig | undefined;
+      const section = cfg?.channels?.["wecom-self"] as WechatWorkConfig | undefined;
       const corpId = section?.corpId;
       const agentId = section?.agentId;
       const secret = section?.secret;
 
       if (!corpId || !agentId || !secret) {
         return {
-          channel: "wechat",
+          channel: "wecom-self",
           ok: false,
           error: "WeChat Work not configured (missing corpId/agentId/secret)",
         };
@@ -817,17 +820,17 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
         content: text,
       });
 
-      return { channel: "wechat", ...result };
+      return { channel: "wecom-self", ...result };
     },
     sendMedia: async ({ to, text, mediaUrl, cfg }) => {
-      const section = cfg?.channels?.wechat as WechatWorkConfig | undefined;
+      const section = cfg?.channels?.["wecom-self"] as WechatWorkConfig | undefined;
       const corpId = section?.corpId;
       const agentId = section?.agentId;
       const secret = section?.secret;
 
       if (!corpId || !agentId || !secret) {
         return {
-          channel: "wechat",
+          channel: "wecom-self",
           ok: false,
           error: "WeChat Work not configured",
         };
@@ -844,7 +847,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWechatWorkAccount> = {
         fallbackToText: true,
       });
 
-      return { channel: "wechat", ...result };
+      return { channel: "wecom-self", ...result };
     },
   },
   status: {

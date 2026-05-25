@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import type { ResolvedWechatWorkAccount, WechatWorkConfig } from "./channel.js";
 import { getWechatRuntime } from "./runtime.js";
 import { loadSpeechCredentials, transcribeVoice } from "./speech.js";
@@ -605,7 +605,7 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
   const dmPolicy = account.config.dmPolicy ?? "pairing";
   runtime.log?.(`[wechat] dmPolicy=${dmPolicy}`);
   const configAllowFrom = (account.config.allowFrom ?? []).map((entry) => String(entry));
-  const storeAllowFrom = await core.channel.pairing.readAllowFromStore("wechat").catch(() => []);
+  const storeAllowFrom = await core.channel.pairing.readAllowFromStore("wecom-self").catch(() => []);
   const effectiveAllowFrom = [...configAllowFrom, ...storeAllowFrom]
     .map((entry) => String(entry).trim())
     .filter(Boolean);
@@ -625,7 +625,7 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
     if (!isAllowed) {
       if (dmPolicy === "pairing") {
         const { code, created } = await core.channel.pairing.upsertPairingRequest({
-          channel: "wechat",
+          channel: "wecom-self",
           id: message.fromUser,
           meta: {},
         });
@@ -633,7 +633,7 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
 
         if (created) {
           // Send pairing response
-          const section = config?.channels?.wechat as WechatWorkConfig | undefined;
+          const section = config?.channels?.["wecom-self"] as WechatWorkConfig | undefined;
           if (section?.corpId && section?.agentId && section?.secret) {
             try {
               const { sendWorkWechatMessage } = await import("./channel.js");
@@ -643,7 +643,7 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
                 agentId: section.agentId,
                 toUser: message.fromUser,
                 content: core.channel.pairing.buildPairingReply({
-                  channel: "wechat",
+                  channel: "wecom-self",
                   idLine: `Your WeChat Work user id: ${message.fromUser}`,
                   code,
                 }),
@@ -666,7 +666,7 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
   // Route to agent
   const route = core.channel.routing.resolveAgentRoute({
     cfg: config,
-    channel: "wechat",
+    channel: "wecom-self",
     accountId: account.accountId,
     peer: {
       kind: "dm",
@@ -698,19 +698,19 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
     RawBody: text,
     CommandBody: text,
     BodyForCommands: text,
-    From: `wechat:${message.fromUser}`,
-    To: `wechat:${message.fromUser}`,
+    From: `wecom-self:${message.fromUser}`,
+    To: `wecom-self:${message.fromUser}`,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
     ChatType: "direct" as const,
     ConversationLabel: message.fromUser,
     SenderId: message.fromUser,
-    Provider: "wechat",
-    Surface: "wechat",
+    Provider: "wecom-self",
+    Surface: "wecom-self",
     MessageSid: message.msgId,
     Timestamp: message.timestamp ?? Date.now(),
-    OriginatingChannel: "wechat",
-    OriginatingTo: `wechat:${message.fromUser}`,
+    OriginatingChannel: "wecom-self",
+    OriginatingTo: `wecom-self:${message.fromUser}`,
     WasMentioned: true,
     CommandAuthorized: true,
   };
@@ -718,7 +718,7 @@ async function processMessage(message: WechatInboundMessage, target: WebhookTarg
   runtime.log?.(`[wechat] dispatching to session=${route.sessionKey} agent=${route.agentId}`);
 
   // Dispatch reply using the standard pipeline
-  const section = config?.channels?.wechat as WechatWorkConfig | undefined;
+  const section = config?.channels?.["wecom-self"] as WechatWorkConfig | undefined;
   try {
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,

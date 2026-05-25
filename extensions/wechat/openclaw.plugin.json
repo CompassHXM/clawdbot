@@ -1,9 +1,77 @@
 {
-  "id": "wechat",
-  "channels": ["wechat"],
+  "id": "wecom-self",
+  "channels": ["wecom-self"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {}
+  },
+  "channelConfigs": {
+    "wecom-self": {
+      "label": "WeChat Work (企业微信)",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable WeChat Work channel."
+          },
+          "corpId": {
+            "type": "string",
+            "description": "WeChat Work corp ID (企业ID)."
+          },
+          "agentId": {
+            "type": "string",
+            "description": "WeChat Work self-built app agent ID."
+          },
+          "secret": {
+            "type": "string",
+            "description": "WeChat Work app secret."
+          },
+          "webhookPath": {
+            "type": "string",
+            "description": "Local webhook route path for WeChat Work callbacks. Default: /wechat-webhook (kept for legacy compatibility)."
+          },
+          "webhookHost": {
+            "type": "string",
+            "description": "Local bind host for the webhook listener."
+          },
+          "webhookPort": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535,
+            "description": "Local bind port for the webhook listener. 0 = ephemeral."
+          },
+          "dmPolicy": {
+            "type": "string",
+            "enum": ["pairing", "allowlist", "open", "disabled"],
+            "default": "pairing",
+            "description": "DM gating policy for inbound messages."
+          },
+          "allowFrom": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "User IDs allowed to DM the agent. Use [\"*\"] for open."
+          },
+          "dm": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "policy": {
+                "type": "string",
+                "enum": ["pairing", "allowlist", "open", "disabled"]
+              },
+              "allowFrom": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
