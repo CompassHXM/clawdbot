@@ -267,11 +267,18 @@ export async function uploadMedia(params: {
     const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
     const body = Buffer.concat([header, fileBuffer, footer]);
 
+    // DIAG: 找出 invalid content-length 根因
+    const clValue = String(body.length);
+    console.error(`[wechat] uploadMedia DIAG: type=${type} fileSize=${fileBuffer.length} bodyLen=${body.length} CL=${JSON.stringify(clValue)} CL.len=${clValue.length} url.len=${url.length} boundary=${boundary} tokenLen=${token.length}`);
+    // DIAG2: 检查 token / url 可疑字符
+    const tokenBad = /[^\x21-\x7e]/.exec(token);
+    const urlBad = /[\r\n\t\0 ]/.exec(url);
+    console.error(`[wechat] uploadMedia DIAG2: tokenHasNonAscii=${!!tokenBad} tokenBadChar=${tokenBad ? JSON.stringify(tokenBad[0]) + '@' + tokenBad.index : 'none'} tokenFirst10=${JSON.stringify(token.slice(0,10))} tokenLast10=${JSON.stringify(token.slice(-10))} urlBad=${urlBad ? JSON.stringify(urlBad[0]) + '@' + urlBad.index : 'none'}`);
+
     const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        "Content-Length": String(body.length),
       },
       body,
     });
@@ -294,7 +301,14 @@ export async function uploadMedia(params: {
 
     return { ok: true, mediaId: data.media_id };
   } catch (err) {
-    return { ok: false, error: String(err) };
+    const e = err as any;
+    const cause = e?.cause;
+    const detail = cause
+      ? ` | cause: ${cause?.name ?? ""} ${cause?.code ?? ""} ${cause?.message ?? String(cause)}`
+      : "";
+    console.error(`[wechat] uploadMedia exception: ${e?.name ?? ""} ${e?.message ?? String(e)}${detail}`);
+    if (e?.stack) console.error(`[wechat] uploadMedia stack: ${e.stack}`);
+    return { ok: false, error: `${String(err)}${detail}` };
   }
 }
 
